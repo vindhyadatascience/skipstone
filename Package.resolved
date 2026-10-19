@@ -1,0 +1,51 @@
+{
+  "originHash" : "924532b186097aef4700b2dcb073772010925063df9fedd3e90cea35b0fdbc22",
+  "pins" : [
+    {
+      "identity" : "elfkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/marcprux/ELFKit.git",
+      "state" : {
+        "revision" : "adc9324508c2cbc6e47419c674a53567e7b74f4d",
+        "version" : "0.2.1"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax.git",
+      "state" : {
+        "revision" : "4799286537280063c85a32f09884cfbca301b1a1",
+        "version" : "602.0.0"
+      }
+    },
+    {
+      "identity" : "swift-tools-support-core",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-tools-support-core.git",
+      "state" : {
+        "revision" : "c574915fe88e942e4c4c93376f022daa2ecf05f9",
+        "version" : "0.8.0"
+      }
+    },
+    {
+      "identity" : "universal",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/marcprux/universal.git",
+      "state" : {
+        "revision" : "7919463ce63685647cd3620e6fda5fb1a91fb9b0",
+        "version" : "5.3.0"
+      }
+    }
+  ],
+  "version" : 3
+}
