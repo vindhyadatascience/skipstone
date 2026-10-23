@@ -24,6 +24,11 @@ if [[ ! -f "${BIN_PATH}/${PRODUCT}" ]]; then
     exit 1
 fi
 
+if LC_ALL=C grep -q -a -E 'without SkipDriveExternal|SkipDriveExternal not available|SkipDrive not linked' "${BIN_PATH}/${PRODUCT}"; then
+    echo "error: ${PRODUCT} was compiled without SkipDriveExternal, so it cannot run skip android commands; run: git submodule update --init && swift package clean" >&2
+    exit 1
+fi
+
 # try to back up any old artifactbundle folder
 mv -f ${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE} ${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE}.bk.`date +%s` || true
 mkdir -p ${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE}/macos

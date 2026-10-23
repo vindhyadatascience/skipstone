@@ -28,7 +28,11 @@ set -o pipefail
 
 # get latest skip
 git pull || true
+# Sources/SkipDriveExternal links into the skip submodule
+git submodule update --init
 swift package update
+# a stale build keeps old #if canImport(SkipDriveExternal) results
+swift package clean
 
 CONFIGURATION=${CONFIGURATION:-"release"}
 
@@ -56,9 +60,6 @@ SKIPBREWDIR="../homebrew-skip"
 cd ${SKIPPKGDIR}
 git fetch --tags --force
 #git tag -l --sort=-version:refname
-
-# Update the skip submodule
-git submodule update --remote --merge
 
 SKIP_VERSION_OLD=$(git tag -l --sort=-version:refname | grep '[0-9]*\.[0-9]*\.[0-9]*' | head -n 1)
 
