@@ -1097,21 +1097,13 @@ public final class CodebaseInfo {
             let mappedSignature = matchingOriginalSignature.constrainedTypeWithGenerics(matchingGenerics)
             let mappedParameters = mappedSignature.parameters
             for i in 0..<matchingParameters.count {
-                // Only a literal may be re-contextualized as a concrete sequence
-                // element type. Preserve precise actual function/tuple/alias
-                // signatures for all other arguments.
-                if arguments[i].value.isArrayLiteral,
-                   let element = arrayLiteralElement(in: mappedParameters[i].type),
-                   isConcreteLiteralElement(element, generics: matchingGenerics) {
-                    matchingParameters[i] = mappedParameters[i].or(matchingParameters[i], replaceAny: true)
-                } else if arguments[i].value.isNumericLiteral,
-                          mappedParameters[i].type.asTypealiased(nil).withoutOptionality().withModuleName(nil) == .uint64 {
-                    // A source integer literal takes the API's UInt64 context;
-                    // an already-typed integer expression keeps its own type.
-                    matchingParameters[i] = mappedParameters[i].or(matchingParameters[i], replaceAny: true)
-                } else {
-                    matchingParameters[i] = matchingParameters[i].or(mappedParameters[i], replaceAny: true)
-                }
+                // Parameter.or(_:) prefers its ARGUMENT's type: this keeps the formal (mapped)
+                // parameter type and fills only what it leaves unknown from the actual one. So a
+                // literal takes its API context: `dict[key, default: []]` with a Set value type
+                // stays a Set literal, and an integer literal for a UInt64 parameter stays UInt64.
+                // 1.9.19-vds.2 reversed the operands for array literals, typing such a default as
+                // an Array (`{ arrayOf() }` for a `Set<String>` value), which Kotlin rejects.
+                matchingParameters[i] = matchingParameters[i].or(mappedParameters[i], replaceAny: true)
             }
             let memberOf: (TypeSignature, TypeSignature?)?
             if let signature = typeInfo?.signature {
@@ -1140,18 +1132,6 @@ public final class CodebaseInfo {
                 result = refined
             }
             return result
-        }
-
-        private func arrayLiteralElement(in formalType: TypeSignature) -> TypeSignature? {
-            let type = formalType.asTypealiased(nil).withoutOptionality().withExistentialMode(.none).withModuleName(nil)
-            switch type {
-            case .array(let element), .set(let element): return element
-            case .named("Sequence", let arguments) where arguments.count == 1:
-                guard let info = primaryTypeInfo(forNamed: formalType), info.declarationType == .protocolDeclaration,
-                      info.moduleName == nil || info.moduleName == "Swift" || info.moduleName == "SkipLib" else { return nil }
-                return arguments[0]
-            default: return nil
-            }
         }
 
         private func isConcreteLiteralElement(_ element: TypeSignature, generics: Generics) -> Bool {

@@ -735,6 +735,17 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         }
     }
 
+    /// `Optional<type>` that keeps a nested Optional's depth (`T??`) but, as `asOptional(true)`
+    /// does, places the Optional inside a typealias of a non-optional type. Inference and Kotlin
+    /// rendering match `.typealiased(alias, .optional(function))` for an optional function alias;
+    /// `.optional(.typealiased(...))` hid the function from them (RNABrowser-fiea.28).
+    static func optionalPreservingDepth(_ type: TypeSignature) -> TypeSignature {
+        if case .typealiased(let alias, let aliased) = type, !aliased.isOptional {
+            return .typealiased(alias, .optional(aliased))
+        }
+        return .optional(type)
+    }
+
     /// Apply the given generic types.
     func withGenerics(_ generics: [TypeSignature]) -> TypeSignature {
         switch self {
@@ -1100,7 +1111,7 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         case .named(let name, let generics):
             return .named(name, generics.map { $0.mappingTypes(with: map) })
         case .optional(let type):
-            return .optional(type.mappingTypes(with: map))
+            return .optionalPreservingDepth(type.mappingTypes(with: map))
         case .range(let element):
             return .range(element?.mappingTypes(with: map))
         case .set(let element):
@@ -1163,7 +1174,7 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
                 return context.resolve(.named(name, generics), moduleName: moduleName)
             }
         case .optional(let type):
-            return .optional(type.resolved(in: node, declaringType: declaringType, moduleName: moduleName, context: context))
+            return .optionalPreservingDepth(type.resolved(in: node, declaringType: declaringType, moduleName: moduleName, context: context))
         case .range(let elementType):
             return .range(elementType?.resolved(in: node, declaringType: declaringType, context: context))
         case .set(let elementType):
@@ -1257,7 +1268,7 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         case .none:
             return typeSignature
         case .optional(let type):
-            return .optional(type.or(typeSignature.asOptional(false)))
+            return .optionalPreservingDepth(type.or(typeSignature.asOptional(false)))
         case .range(let elementType):
             if case .range(let elementType2) = strippedTypeSignature {
                 let resolvedElementType = elementType2 == nil ? elementType : elementType?.or(elementType2!, replaceAny: replaceAny)

@@ -3519,7 +3519,11 @@ final class KotlinVariableDeclaration: KotlinStatement, KotlinMemberDeclaration 
         let finallyIndentation = bodyIndentation.inc()
         let isPublic = (visibility == .public || visibility == .open) &&
             (modifiers.setVisibility == .default || modifiers.setVisibility == .public || modifiers.setVisibility == .open)
-        output.append(indentation).append("\(isPublic ? "public" : "internal") fun <R> \(name)(body: (InOut<\(propertyType.kotlin)>) -> R): R {\n")
+        // A private property's accessor stays private: an internal one would expose a private
+        // nested property type, which Kotlin rejects ("'internal' function exposes its
+        // 'private-in-class' parameter type argument").
+        let access = isPublic ? "public" : (visibility == .private ? "private" : "internal")
+        output.append(indentation).append("\(access) fun <R> \(name)(body: (InOut<\(propertyType.kotlin)>) -> R): R {\n")
         if let mutationFunctionNames {
             output.append(bodyIndentation).append("\(mutationFunctionNames.willMutate)()\n")
         }

@@ -86,7 +86,9 @@ extension TypeSignature {
             // nullable representation has one level; consumers needing presence
             // (such as AnyHashable erasure) diagnose unsupported nested values.
             if type.isOptional { return type.kotlin }
-            switch type {
+            // Look through a typealias: `Alias?` for a function alias is still a nullable
+            // function type and needs the parentheses.
+            switch type.asTypealiased(nil) {
             case .function:
                 return "(\(type.kotlin))?"
             default:
