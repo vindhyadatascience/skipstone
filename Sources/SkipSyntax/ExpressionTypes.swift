@@ -152,7 +152,15 @@ final class ArrayLiteral: Expression {
         var elementType = collectionType.elementType
         // Sequence<Element> is a named/existential protocol, so its element
         // comes from the iterator contract rather than the builtin shape alone.
-        let expectedElementType = expecting == .none ? .none : context.elementType(of: expecting)
+        // A builtin Array/Set expectation states its element directly, even when that is still
+        // unknown (`[[], []]`: the second element is expected as `[?]`). Asking such a type for its
+        // iterator returns the unbound `Element` generic, which then fails every overload.
+        let expectedElementType: TypeSignature
+        switch expecting.asTypealiased(nil).withoutOptionality() {
+        case .none: expectedElementType = .none
+        case .array, .set: expectedElementType = expecting.elementType
+        default: expectedElementType = context.elementType(of: expecting)
+        }
         if expectedElementType != .none {
             elementType = expectedElementType
             elements.forEach { $0.inferTypes(context: context, expecting: elementType) }
@@ -1401,7 +1409,7 @@ final class MacroExpansion: Expression {
             if let suffix {
                 let messages = args.dropFirst().compactMap { argument -> LabeledValue<Expression>? in
                     if argument.label?.text == "sourceLocation" { return nil }
-                    return LabeledValue(value: ExpressionDecoder.decode(syntax: argument.expression, in: syntaxTree))
+                    return LabeledValue(value: ExpressionDecoder.decode(syntax: testingCommentText(argument.expression), in: syntaxTree))
                 }
                 return FunctionCall(function: Identifier(name: prefix + suffix), arguments: [
                     LabeledValue(value: comparison.lhs), LabeledValue(value: comparison.rhs)
@@ -1414,7 +1422,7 @@ final class MacroExpansion: Expression {
         // Include any extra message arguments
         for arg in args.dropFirst() {
             if arg.label?.text == "sourceLocation" { continue }
-            allArgs.append(LabeledValue(label: arg.label?.text, value: ExpressionDecoder.decode(syntax: arg.expression, in: syntaxTree)))
+            allArgs.append(LabeledValue(label: arg.label?.text, value: ExpressionDecoder.decode(syntax: testingCommentText(arg.expression), in: syntaxTree)))
         }
 
         // If we have a trailing closure (e.g. #expect { ... }), use it
@@ -1426,6 +1434,19 @@ final class MacroExpansion: Expression {
         let call = FunctionCall(function: Identifier(name: isThrowing ? "requireNotNil" : "\(prefix)True"), arguments: allArgs, syntax: macroExpansionExpr)
         call.isSwiftTestingRequirement = isThrowing
         return call
+    }
+
+    /// A Swift Testing message is a `Comment`, often spelled `Comment(stringLiteral: text)` or
+    /// `Comment(rawValue: text)`. SkipUnit's assertions take the message as a String, so pass the
+    /// text itself; there is no Kotlin `Comment` type.
+    private static func testingCommentText(_ expression: ExprSyntax) -> ExprSyntax {
+        guard let call = expression.as(FunctionCallExprSyntax.self),
+              call.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text == "Comment",
+              call.arguments.count == 1, let argument = call.arguments.first,
+              argument.label?.text == "stringLiteral" || argument.label?.text == "rawValue" else {
+            return expression
+        }
+        return argument.expression
     }
 
     private static func colorLiteral(syntax macroExpansionExpr: MacroExpansionExprSyntax) -> Expression {

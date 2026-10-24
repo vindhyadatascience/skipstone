@@ -64,4 +64,29 @@ final class CollectionConstructorMetadataTests: XCTestCase {
         }
         XCTAssertTrue(kotlin.contains("Set<Float>(arrayOf(-0.0f, 0.0f))"), kotlin)
     }
+
+    /// RNABrowser-fiea.28: `[[], []]` for a `[[Double]]` parameter. 1.9.19-vds.2 asked the
+    /// provisional `[?]` expectation of the second element for its iterator element, got the
+    /// unbound `Element` generic, and then no overload matched (FoxCoreTests: "unable to determine
+    /// the owning type for member 'log2'").
+    func testNestedEmptyArrayLiteralsMatchTheirParameter() async throws {
+        let file = try tmpFile(named: "Source.swift", contents: """
+        public enum Scale { case log2, linear }
+        public struct Input {
+            public static func make(groups: [[Double]], scale: Scale) -> Input? { nil }
+        }
+        func use() -> Input? {
+            return Input.make(groups: [[], []], scale: .log2)
+        }
+        """)
+        let info = CodebaseInfo(moduleName: "Consumer")
+        info.dependentModules = [try await symbols()]
+        var kotlin = ""
+        let transpiler = Transpiler(packageName: "consumer", transpileFiles: [Source.FilePath(path: file.path)], codebaseInfo: info, transformers: builtinKotlinTransformers())
+        try await transpiler.transpile { result in
+            XCTAssertTrue(result.messages.isEmpty, result.messages.map(\.formattedMessage).joined(separator: "\n"))
+            kotlin += result.output.content
+        }
+        XCTAssertTrue(kotlin.contains("Input.make(groups = arrayOf(arrayOf(), arrayOf()), scale = Scale.log2)"), kotlin)
+    }
 }
