@@ -1,4 +1,8 @@
 #!/bin/bash -ex
+VDS_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${VDS_SOURCE_ROOT}"
+: "${SKIP_VERSION:?Set SKIP_VERSION to the exact committed compiler version}"
+VDS_SOURCE_SHA=$(python3 scripts/vds_linux_artifact.py check-source --version "${SKIP_VERSION}")
 CONFIGURATION=${CONFIGURATION:-"release"}
 PRODUCT=${PRODUCT:-"SkipRunner"}
 SKIPCMD=skip
@@ -34,6 +38,8 @@ mv -f ${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE} ${ARTIFACT_BUILD_DIR}/${ARTIFACTBU
 mkdir -p ${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE}/macos
 
 cp -av "${BIN_PATH}/${PRODUCT}" "${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE}/macos/${SKIPCMD}"
+python3 scripts/vds_linux_artifact.py stamp --source "${VDS_SOURCE_SHA}" --version "${SKIP_VERSION}" \
+    --output "${ARTIFACT_BUILD_DIR}/${ARTIFACTBUNDLE}"
 
 cd ${ARTIFACT_BUILD_DIR}
 
@@ -85,7 +91,10 @@ du -skh "${ARTIFACTBUNDLE}"
 
 # sync file times to git date for build reproducability
 #find ${ARTIFACTBUNDLE} -exec touch -d "${GITDATE:0:19}" {} \;
+rm -f "${PLUGIN_ZIP}"
 zip -9 -q --symlinks -r ${PLUGIN_ZIP} ${ARTIFACTBUNDLE}
+python3 "${VDS_SOURCE_ROOT}/scripts/vds_linux_artifact.py" verify-macos \
+    --source "${VDS_SOURCE_SHA}" --version "${SKIP_VERSION}" --bundle "${PLUGIN_ZIP}"
 unzip -l "${PLUGIN_ZIP}" 
 du -skh "${PLUGIN_ZIP}"
 

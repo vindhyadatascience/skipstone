@@ -1,10 +1,12 @@
 import importlib.util,json,os,re,struct,subprocess,sys,tempfile,textwrap,unittest,zipfile
 from pathlib import Path
+from unittest import mock
 spec=importlib.util.spec_from_file_location('artifact',Path(__file__).parents[1]/'vds_linux_artifact.py')
 a=importlib.util.module_from_spec(spec);spec.loader.exec_module(a)
 class LinuxArtifactTests(unittest.TestCase):
     source='a'*40
     version='1.9.19-vds.2'
+    license_bytes=(Path(__file__).parents[2]/'LICENSE.txt').read_bytes()
     def test_pinned_submodule_status_preserves_the_first_entry_prefix(self):
         line=' '+('b'*40)+' skip (1.9.19)'
         self.assertEqual(a.pinned_submodules(line+'\n'),[line])
@@ -20,7 +22,8 @@ class LinuxArtifactTests(unittest.TestCase):
         bundle=folder/'skip-linux.zip'
         with zipfile.ZipFile(bundle,'w') as z:
             z.writestr('skip.artifactbundle/info.json',json.dumps(info));z.writestr('skip.artifactbundle/bin/skip',launcher);z.writestr(f'skip.artifactbundle/{arch}-swift-linux-musl/skip',binary)
-        record={'arch':arch,'source_sha':self.source,'version':self.version,'full_tests_passed':True,'static_binary_smoke_passed':True,'bundle_sha256':a.sha(bundle.read_bytes()),'binary_sha256':a.sha(binary),'launcher_sha256':a.sha(launcher),'lock_sha256':'lock','submodules':[' '+('b'*40)+' skip'],'workflow_sha':'workflow','run_id':'run','run_attempt':'1'}
+            z.writestr('skip.artifactbundle/LICENSE.txt',self.license_bytes);z.writestr('skip.artifactbundle/SOURCE.txt',a.source_record(self.source,self.version))
+        record={'arch':arch,'source_sha':self.source,'version':self.version,'full_tests_passed':True,'static_binary_smoke_passed':True,'bundle_sha256':a.sha(bundle.read_bytes()),'binary_sha256':a.sha(binary),'launcher_sha256':a.sha(launcher),'license_sha256':a.sha(self.license_bytes),'source_record_sha256':a.sha(a.source_record(self.source,self.version)),'lock_sha256':'lock','submodules':[' '+('b'*40)+' skip'],'workflow_sha':'workflow','run_id':'run','run_attempt':'1'}
         (folder/'receipt.json').write_text(json.dumps(record));return folder
     def inputs(self,base):
         for arch in a.ARCHES:self.fixture(base,arch)
@@ -31,6 +34,9 @@ class LinuxArtifactTests(unittest.TestCase):
             with zipfile.ZipFile(out/'skip-linux.zip') as z:
                 self.assertEqual(len(json.loads(z.read('skip.artifactbundle/info.json'))['artifacts']['skip']['variants']),2)
                 for arch in a.ARCHES:self.assertEqual(z.getinfo(f'skip.artifactbundle/{arch}-swift-linux-musl/skip').external_attr>>16 & 0o777,0o755)
+                for name in ['LICENSE.txt','SOURCE.txt']:self.assertEqual(z.getinfo('skip.artifactbundle/'+name).external_attr>>16 & 0o777,0o644)
+                self.assertEqual(z.read('skip.artifactbundle/LICENSE.txt'),self.license_bytes)
+                self.assertEqual(z.read('skip.artifactbundle/SOURCE.txt'),a.source_record(self.source,self.version))
     def test_refuses_one_arch_or_reused_output(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d);self.fixture(p,'x86_64')
@@ -49,7 +55,108 @@ class LinuxArtifactTests(unittest.TestCase):
     def test_refuses_wrong_elf_architecture(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d);f=self.fixture(p,'x86_64')/'skip-linux.zip'
-            with self.assertRaisesRegex(RuntimeError,'Unexpected native variant'):a.check_bundle(f,'aarch64',self.version)
+            with self.assertRaisesRegex(RuntimeError,'Unexpected native variant'):a.check_bundle(f,'aarch64',self.version,self.source)
+
+    def rewrite(self,path,change):
+        with zipfile.ZipFile(path) as z:entries={n:z.read(n) for n in z.namelist()}
+        change(entries)
+        with zipfile.ZipFile(path,'w') as z:
+            for n,b in entries.items():z.writestr(n,b)
+
+    def test_refuses_missing_or_changed_license_and_source_even_with_recomputed_receipt(self):
+        for name,content in [('LICENSE.txt',None),('LICENSE.txt',b'wrong license'),('SOURCE.txt',None),('SOURCE.txt',a.source_record('b'*40,self.version)),('SOURCE.txt',a.source_record(self.source,'1.9.19-vds.1'))]:
+            with self.subTest(name=name,content=content),tempfile.TemporaryDirectory() as d:
+                p=Path(d);self.inputs(p);f=p/'aarch64/skip-linux.zip'
+                def change(entries):
+                    key='skip.artifactbundle/'+name
+                    if content is None:entries.pop(key)
+                    else:entries[key]=content
+                self.rewrite(f,change)
+                r=p/'aarch64/receipt.json';record=json.loads(r.read_text());record['bundle_sha256']=a.sha(f.read_bytes())
+                if content is not None:record['license_sha256' if name=='LICENSE.txt' else 'source_record_sha256']=a.sha(content)
+                r.write_text(json.dumps(record))
+                with self.assertRaisesRegex(RuntimeError,'artifact files|LICENSE|SOURCE'):a.combine(p,p/'out',self.source,self.version)
+
+    def test_refuses_unknown_archive_member(self):
+        with tempfile.TemporaryDirectory() as d:
+            f=self.fixture(Path(d),'x86_64')/'skip-linux.zip'
+            with zipfile.ZipFile(f,'a') as z:z.writestr('skip.artifactbundle/unreviewed.txt',b'not allowed')
+            with self.assertRaisesRegex(RuntimeError,'unexpected artifact files'):a.check_bundle(f,'x86_64',self.version,self.source)
+
+    def test_refuses_duplicate_or_symlink_metadata(self):
+        for kind in ['duplicate','symlink']:
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as d:
+                f=self.fixture(Path(d),'x86_64')/'skip-linux.zip'
+                if kind=='duplicate':
+                    with self.assertWarns(UserWarning):
+                        with zipfile.ZipFile(f,'a') as z:z.writestr('skip.artifactbundle/SOURCE.txt',a.source_record(self.source,self.version))
+                    error='Duplicate'
+                else:
+                    with zipfile.ZipFile(f) as z:entries={n:z.read(n) for n in z.namelist()}
+                    with zipfile.ZipFile(f,'w') as z:
+                        for n,b in entries.items():
+                            info=zipfile.ZipInfo(n)
+                            if n.endswith('SOURCE.txt'):info.external_attr=0o120777<<16
+                            z.writestr(info,b)
+                    error='symlinks'
+                with self.assertRaisesRegex(RuntimeError,error):a.check_bundle(f,'x86_64',self.version,self.source)
+
+    def test_macos_archive_requires_same_exact_metadata_and_unchanged_variant(self):
+        with tempfile.TemporaryDirectory() as d:
+            f=Path(d)/'skip-macos.zip';info={'artifacts':{'skip':{'version':self.version,'variants':[{'path':'macos/skip','supportedTriples':['x86_64-apple-macosx','arm64-apple-macosx']}]}}}
+            with zipfile.ZipFile(f,'w') as z:
+                for n,b in {'info.json':json.dumps(info).encode(),'macos/skip':b'fixture Mach-O, not executed','bin/skip':b'launcher','LICENSE.txt':self.license_bytes,'SOURCE.txt':a.source_record(self.source,self.version)}.items():z.writestr('skip.artifactbundle/'+n,b)
+            a.check_archive(f,['macos'],self.version,self.source,'macos')
+            self.rewrite(f,lambda e:e.update({'skip.artifactbundle/SOURCE.txt':b'wrong'}))
+            with self.assertRaisesRegex(RuntimeError,'SOURCE'):a.check_archive(f,['macos'],self.version,self.source,'macos')
+
+    def test_source_record_is_deterministic_and_refuses_noncommit_or_unversioned_source(self):
+        expected=a.source_record(self.source,self.version)
+        self.assertEqual(expected,a.source_record(self.source,self.version))
+        for value in [self.source,self.version,a.SOURCE_REPOSITORY+'/tree/'+self.source,a.UPSTREAM_REPOSITORY,'AGPL-3.0-only']:self.assertIn(value.encode(),expected)
+        self.assertTrue(expected.endswith(b'\n'));self.assertNotIn(b'\r',expected)
+        with self.assertRaisesRegex(RuntimeError,'full source'):a.source_record('main',self.version)
+        with self.assertRaisesRegex(RuntimeError,'VDS source version'):a.source_record(self.source,'1.9.19')
+
+    def clean_fixture(self,root,status=''):
+        version_text='public let skipVersion = "'+self.version+'"\n'
+        path=root/'Sources/SkipSyntax/Version.swift';path.parent.mkdir(parents=True,exist_ok=True);path.write_text(version_text)
+        (root/'LICENSE.txt').write_bytes(self.license_bytes)
+        def command(cmd,cwd=None):
+            if cmd==['git','rev-parse','--show-toplevel']:return str(root)+'\n'
+            if cmd==['git','rev-parse','HEAD']:return self.source+'\n'
+            if cmd[:3]==['git','status','--porcelain']:return status
+            if cmd==['git','submodule','status','--recursive']:return ''
+            if cmd==['git','show',self.source+':Sources/SkipSyntax/Version.swift']:return version_text
+            if cmd==['git','show',self.source+':LICENSE.txt']:return self.license_bytes.decode()
+            raise AssertionError(cmd)
+        return command
+
+    def test_stamp_uses_actual_clean_commit_and_exact_license_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);command=self.clean_fixture(root);out=root/'.build/skip.artifactbundle';out.mkdir(parents=True)
+            with mock.patch.object(a,'run',side_effect=command):a.stamp(root,out,self.source,self.version)
+            self.assertEqual((out/'LICENSE.txt').read_bytes(),self.license_bytes)
+            self.assertEqual((out/'SOURCE.txt').read_bytes(),a.source_record(self.source,self.version))
+            for name in ['LICENSE.txt','SOURCE.txt']:self.assertEqual((out/name).stat().st_mode & 0o777,0o644)
+
+    def test_dirty_source_and_future_source_identity_refused_before_stamping(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);command=self.clean_fixture(root,status=' M scripts/vds_linux_artifact.py\n');out=root/'.build/skip.artifactbundle';out.mkdir(parents=True)
+            with mock.patch.object(a,'run',side_effect=command):
+                with self.assertRaisesRegex(RuntimeError,'clean and committed'):a.stamp(root,out,self.source,self.version)
+            command=self.clean_fixture(root)
+            with mock.patch.object(a,'run',side_effect=command):
+                with self.assertRaisesRegex(RuntimeError,'moved during build'):a.stamp(root,out,'b'*40,self.version)
+            self.assertFalse((out/'SOURCE.txt').exists())
+
+    def test_mismatched_source_version_or_changed_license_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);command=self.clean_fixture(root)
+            with mock.patch.object(a,'run',side_effect=command):
+                with self.assertRaisesRegex(RuntimeError,'Embedded source version'):a.clean_source(root,'1.9.19-vds.1')
+            (root/'LICENSE.txt').write_bytes(b'not the source license')
+            with self.assertRaisesRegex(RuntimeError,'unchanged AGPL'):a.metadata_files(root,self.source,self.version)
 class LinuxWorkflowInputTests(unittest.TestCase):
     def validate(self,source,version,event='workflow_dispatch',push_sha='',push_ref=''):
         workflow=(Path(__file__).parents[2]/'.github/workflows/vds-linux-build.yml').read_text()

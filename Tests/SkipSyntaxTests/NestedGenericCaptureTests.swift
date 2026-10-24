@@ -37,10 +37,18 @@ final class NestedGenericCaptureTests: XCTestCase {
                 func cast(_ value: Any) -> Any { return value as! T }
             }
         }
+        func checkNotNull(_ value: Any) -> String { return "user function must not be selected" }
+        func nullableCast<T>(_ value: Any?) -> T { return value as! T }
         func answer() -> Int {
             let mixed = Outer<Int>.Inner<String>(outer: 42, inner: "ok")
             let equal = Outer<Int>.Inner<Int>(outer: 1, inner: 2)
             let deep = Outer<Int>.Middle<Int>.Deep<Int>(outer: 1, middle: 2, deep: 3)
+            let plain = Outer<Int>.BodyOnly().cast(11) as! Int
+            if plain != 11 { return -1 }
+            let some = Outer<Int?>.BodyOnly().cast(13) as! Int?
+            if some != 13 { return -2 }
+            let none: Int? = nullableCast(nil)
+            if none != nil { return -3 }
             return mixed.outer + equal.inner + deep.middle
         }
         """, fixture: "native-nested")
@@ -48,6 +56,12 @@ final class NestedGenericCaptureTests: XCTestCase {
         XCTAssertTrue(kotlin.contains("class Middle<V>"), kotlin)
         XCTAssertTrue(kotlin.contains("class Deep<T, V, W>"), kotlin)
         XCTAssertTrue(kotlin.contains("class BodyOnly<T>"), kotlin)
+        // Any input is proven non-null, even when T is instantiated as Optional.
+        // Nullable Any? -> T remains a nullable cast and must not receive this check.
+        XCTAssertTrue(kotlin.contains("kotlin.checkNotNull(value as T).sref()"), kotlin)
+        XCTAssertEqual(kotlin.components(separatedBy: "kotlin.checkNotNull(").count - 1, 1, kotlin)
+        XCTAssertTrue(kotlin.contains("fun <T> nullableCast(value: Any?): T = (value as T).sref()"), kotlin)
+        XCTAssertTrue(kotlin.contains("Outer.BodyOnly<Int?>().cast(13)"), kotlin)
         XCTAssertTrue(kotlin.contains("Outer.Inner<Int, Int>(outer = 1, inner = 2)"), kotlin)
         XCTAssertTrue(kotlin.contains("Outer.Middle.Deep<Int, Int, Int>(outer = 1, middle = 2, deep = 3)"), kotlin)
         XCTAssertFalse(kotlin.contains("Outer<Int>.Middle"), kotlin)

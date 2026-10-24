@@ -154,3 +154,22 @@ they must not be represented as a native test run on that architecture.
 Publish source and exact archive checksums together, then update the SwiftPM
 wrapper, CLI, CI and tap pins as one graph. Recheck that graph without local
 package edits or a compiler override before application integration.
+
+Every macOS and Linux artifact bundle contains the unchanged `LICENSE.txt`
+(AGPL-3.0-only) and a deterministic `SOURCE.txt`: the embedded compiler version,
+full source commit, public corresponding-source URL and upstream repository.
+These files sit beside `info.json`; executable and launcher paths are unchanged.
+Both builders require `SKIP_VERSION` to match a clean, committed checkout and
+its pinned submodules. They capture that actual commit before building and check
+it again when stamping the bundle. Commit the complete candidate first; never
+substitute a future commit or stamp an uncommitted worktree as a release source.
+
+The native CI receipt and combined Linux archive retain and verify both files.
+Verification requires the exact license bytes and canonical source record for
+the reviewed version/commit, rejects missing, duplicate, symlinked and unexpected
+archive entries, and preserves metadata as ordinary readable files. Recomputed
+archive checksums do not make changed license or source identities acceptable.
+The local exported-source Linux procedure derives the same record from its
+verified clean-commit snapshot receipt because that snapshot contains no `.git`.
+Prepare new receipts and archive checksums after this packaging change; older
+bundles without this metadata are deliberately rejected.

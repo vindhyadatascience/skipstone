@@ -18,6 +18,23 @@ private final class KotlinHashableCastOptionalReceiver: KotlinExpression {
     }
 }
 
+/// The builtin is a coercion, not a Swift function that already copied its
+/// return. Keep the original cast visible and preserve its value-copy decision.
+private final class KotlinProvenNonNullAnyCast: KotlinExpression {
+    let value: KotlinExpression
+    init(value: KotlinExpression) {
+        self.value = value
+        super.init(type: .raw, sourceFile: value.sourceFile, sourceRange: value.sourceRange)
+    }
+    override var children: [KotlinSyntaxNode] { [value] }
+    override func mayBeSharedMutableStructExpression(orType: Bool) -> Bool {
+        value.mayBeSharedMutableStructExpression(orType: orType)
+    }
+    override func append(to output: OutputGenerator, indentation: Indentation) {
+        output.append("kotlin.checkNotNull(").append(value, indentation: indentation).append(")")
+    }
+}
+
 /// API lowering shared by the normal expression translator. Runtime semantics live
 /// in SkipLib; these nodes preserve Swift conversions and writeback at call sites.
 enum KotlinStandardLibraryParity {
@@ -197,6 +214,20 @@ enum KotlinStandardLibraryParity {
     /// Called once after normal translation, with the expected type of this
     /// source expression. In particular, do not recursively translate `expression`.
     static func coerce(_ value: KotlinExpression, expression: Expression, to expectedType: TypeSignature, sourceType: TypeSignature? = nil) -> KotlinExpression {
+        // Kotlin leaves T nullable, but an ordinary forced cast cannot turn an
+        // explicitly non-null Any parameter into null. Preserve the existing
+        // return-copy step after refining only this proven, direct-return case.
+        if canonicalType(expectedType).withModuleName(nil) == .any,
+           let cast = expression as? BinaryOperator, cast.op.symbol == "as!",
+           let target = cast.rhs as? TypeLiteral,
+           !target.literal.isOptional, !target.literal.isUnwrappedOptional,
+           isGenericReference(canonicalType(target.literal), in: expression),
+           isDirectNonNullAnyParameterCast(cast),
+           let ordinary = value as? KotlinBinaryOperator, ordinary.op.symbol == "as!",
+           let source = cast.lhs as? Identifier,
+           (ordinary.lhs as? KotlinIdentifier)?.name == source.name {
+            return KotlinProvenNonNullAnyCast(value: value)
+        }
         guard isAnyHashable(expectedType),
               !(expression is NilLiteral), !(value is KotlinAnyHashableParity) else { return value }
         // AnyHashable's implicit conversion is not an ExpressibleByStringLiteral
@@ -219,6 +250,24 @@ enum KotlinStandardLibraryParity {
         let literal = expression is NumericLiteral || expression is StringLiteral || expression is BooleanLiteral
         if !literal && isAnyHashable(actual) { return value }
         return anyHashableConversion(value, expression: expression, actualType: actual, optionalTarget: expectedType.isOptional)
+    }
+
+    /// A declared parameter and a single direct return prove this binding without
+    /// treating an inferred Any fallback as evidence. Extra statements, nested
+    /// closures, properties, calls and raw expressions retain their existing path.
+    private static func isDirectNonNullAnyParameterCast(_ cast: BinaryOperator) -> Bool {
+        guard let identifier = cast.lhs as? Identifier,
+              let statement = cast.parent as? ExpressionStatement,
+              statement.type == .return || statement.type == .expression,
+              statement.expression === cast,
+              let block = statement.parent as? CodeBlock,
+              block.statements.filter({ $0.type != .empty }).count == 1,
+              let function = block.parent as? FunctionDeclaration,
+              function.body === block else { return false }
+        return function.parameters.contains { parameter in
+            parameter.internalLabel == identifier.name
+                && canonicalType(parameter.declaredType).withModuleName(nil) == .any
+        }
     }
 
     private static func anyHashableConversion(_ value: KotlinExpression, expression: Expression,
