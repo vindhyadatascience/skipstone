@@ -173,3 +173,27 @@ The local exported-source Linux procedure derives the same record from its
 verified clean-commit snapshot receipt because that snapshot contains no `.git`.
 Prepare new receipts and archive checksums after this packaging change; older
 bundles without this metadata are deliberately rejected.
+
+## 1.9.19-vds.3 repairs (RNABrowser-fiea.28, .30)
+
+Gated against GeneFox's two JVM suites (FoxCoreTests 5451, LocusTests 2902) and a
+whole-app differential transpilation against 1.9.16-vds.1; 1.9.19-vds.2 had not been.
+
+- Memberwise initializers follow Swift 6.4 access: a private/fileprivate defaulted
+  property adds an initializer that omits it; private wrapped defaulted properties
+  are omitted entirely.
+- An unmatched constructor of another module's concrete type yields that type
+  (no invented signature); an explicitly specialized `T<X>(...)` keeps `T<X>`.
+- Literal parameter context is formal-first again; nested `[[], []]` takes its
+  builtin element expectation; `a...b` matches `ClosedRange<Bound>` parameters.
+- Optional function typealiases keep `.typealiased(alias, .optional(fn))`.
+- Private stored properties get private scoped-modify accessors; memberwise Kotlin
+  constructors start from public again, as upstream.
+- AnyHashable boxing is off (`KotlinStandardLibraryParity.boxesAnyHashable`): the
+  runtime keeps `typealias AnyHashable = Hashable`, because runtime collections hold
+  raw keys. Its tests skip while it is off.
+- Swift Testing `Comment(...)` messages are passed as their text.
+
+Tags are now SemVer prereleases (`1.9.19-vds.3` here, and `<version>-vds.N` on the
+runtime forks): SwiftPM ignores `+build` metadata, so `+vds.N` tags were not distinct
+versions to it. Consumers pin every fork by exact revision.
