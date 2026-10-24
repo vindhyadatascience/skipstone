@@ -313,6 +313,28 @@ struct TypeInferenceContext {
         }
     }
 
+    /// The type produced by `T(...)` when `T` is a concrete type from another module and none of
+    /// its visible initializers match. Swift's `T(...)` always yields `T`, so callers may use it to
+    /// choose overloads (e.g. `items.contains(T(...))`). No initializer signature is invented, so the
+    /// arguments are never checked against one. Returns nil for this module's types, which have
+    /// real or generated initializers, and for generic types whose arguments an initializer infers.
+    func externalConstructedType(_ type: TypeSignature) -> TypeSignature? {
+        guard let codebaseInfo, let info = codebaseInfo.primaryTypeInfo(forNamed: type),
+              info.moduleName != nil, info.moduleName != codebaseInfo.global.moduleName else {
+            return nil
+        }
+        switch info.declarationType {
+        case .structDeclaration, .classDeclaration, .enumDeclaration, .actorDeclaration:
+            break
+        default:
+            return nil
+        }
+        guard info.generics.entries.isEmpty else {
+            return nil
+        }
+        return type
+    }
+
     /// Return the signatures of the functions matching the given arguments.
     ///
     /// The match on the argument types will attempt to allow for unknown types. The returned signature may be different than the returned `APIMatch.signature` due to optional chaining.

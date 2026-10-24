@@ -130,6 +130,28 @@ final class MemberwiseInitializerAccessTests: XCTestCase {
         """, [(["x", "p", "q"], .private)])
     }
 
+    /// Both synthesized initializers are visible in the declaring file; a call there must not be
+    /// reported as ambiguous (any warning would also trip consumers' Skip warning gates).
+    func testSameFileCallsDoNotReportAmbiguity() async throws {
+        let file = try tmpFile(named: "Same.swift", contents: """
+        struct T { let x: Int; private var p = 0
+            static func full() -> T { T(x: 1, p: 2) }
+        }
+        func make() -> T { T(x: 1) }
+        """)
+        let info = CodebaseInfo(moduleName: "MemberwiseConsumer")
+        var messages: [String] = []
+        var kotlin = ""
+        try await Transpiler(transpileFiles: [Source.FilePath(path: file.path)], codebaseInfo: info,
+            transformers: builtinKotlinTransformers()).transpile { result in
+                messages += result.messages.map(\.formattedMessage)
+                kotlin += result.output.content
+            }
+        XCTAssertEqual(messages, [])
+        XCTAssertTrue(kotlin.contains("T(x = 1, p = 2)"), kotlin)
+        XCTAssertTrue(kotlin.contains("T(x = 1)"), kotlin)
+    }
+
     /// The fiea.28 symptom: a View constructed in another file, with a chained implicit member.
     func testViewWithPrivateDefaultedStateIsConstructibleFromAnotherFile() async throws {
         let (kotlin, _, messages) = try await transpile([

@@ -934,6 +934,12 @@ final class FunctionCall: Expression, APICallExpression, MemberAccessExpression 
             if match.1.declarationType == .functionDeclaration, var functionExpression = function as? APICallExpression, matchBaseType?.isNamed("Optional") != true {
                 functionExpression.apiMatch = match.1
             }
+        } else if name == nil, let baseType, let constructedType = context.externalConstructedType(baseType) {
+            // `T(...)` yields `T` even when no visible initializer of another module's type matches
+            // (e.g. a dependency struct whose memberwise init is internal). Record only the result
+            // type so enclosing overloads resolve; leave apiMatch nil rather than inventing an init.
+            isInit = true
+            returnType = constructedType
         } else {
             returnType = expecting
         }
