@@ -42,7 +42,7 @@ struct KotlinBindingVariable {
         if names.count > 1 {
             output.append("(")
         }
-        output.append(names.map { $0 ?? "_" }.joined(separator: ", "))
+        output.append(names.map { $0?.fixingKeyword(in: KotlinIdentifier.hardKeywords) ?? "_" }.joined(separator: ", "))
         if names.count > 1 {
             output.append(")")
         }

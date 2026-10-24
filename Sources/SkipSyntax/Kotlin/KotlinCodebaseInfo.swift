@@ -17,6 +17,7 @@ extension CodebaseInfo {
     /// Kotlin builtin names.
     static let kotlinSkipLibBuiltinNames: Set<String> = [
         "Array",
+        "AnyHashable",
         "Collection",
         "MutableCollection",
         "Sequence",

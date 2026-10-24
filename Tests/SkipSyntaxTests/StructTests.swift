@@ -358,18 +358,32 @@ final class StructTests: XCTestCase {
             }
         }
         """, kotlin: """
+        import skip.lib.InOut
+
         @Suppress("MUST_BE_INITIALIZED")
         internal class S: MutableStruct {
             internal val letms: MS
             internal val letis: IS
             internal var varms: MS
-                get() = field.sref({ this.varms = it })
+                get() = smodify_varmsstorage.sref({ this.varms = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_varmsstorage = newValue
                     didmutate()
                 }
+            private lateinit var smodify_varmsstorage: MS
+            internal fun <R> smodify_varms(body: (InOut<MS>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_varmsstorage }, { smodify_varmsstorage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
             internal var varis: IS
                 set(newValue) {
                     willmutate()
@@ -435,35 +449,79 @@ final class StructTests: XCTestCase {
         }
         """, kotlin: """
         import skip.lib.Array
-        
-        @Suppress("MUST_BE_INITIALIZED")
+        import skip.lib.InOut
+
         internal class S: MutableStruct {
             internal val letms: MS
             internal var varms: MS
-                get() = field.sref({ this.varms = it })
+                get() = smodify_varmsstorage.sref({ this.varms = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_varmsstorage = newValue
                     didmutate()
                 }
+            private lateinit var smodify_varmsstorage: MS
+            internal fun <R> smodify_varms(body: (InOut<MS>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_varmsstorage }, { smodify_varmsstorage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
             internal val letarr: Array<MS>
             internal var vararr: Array<MS>
-                get() = field.sref({ this.vararr = it })
+                get() = smodify_vararrstorage.sref({ this.vararr = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_vararrstorage = newValue
                     didmutate()
                 }
-            internal var letiarr: Array<IS> = arrayOf()
-                get() = field.sref({ this.letiarr = it })
+            private lateinit var smodify_vararrstorage: Array<MS>
+            internal fun <R> smodify_vararr(body: (InOut<Array<MS>>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_vararrstorage }, { smodify_vararrstorage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
+            internal val sread_vararr_count: Int
+                get() = smodify_vararrstorage.count
+            internal val sread_vararr_isEmpty: Boolean
+                get() = smodify_vararrstorage.isEmpty
+            internal var letiarr: Array<IS>
+                get() = smodify_letiarrstorage.sref({ this.letiarr = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_letiarrstorage = newValue
                     didmutate()
                 }
+            private var smodify_letiarrstorage: Array<IS> = arrayOf()
+            internal fun <R> smodify_letiarr(body: (InOut<Array<IS>>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_letiarrstorage }, { smodify_letiarrstorage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
+            internal val sread_letiarr_count: Int
+                get() = smodify_letiarrstorage.count
+            internal val sread_letiarr_isEmpty: Boolean
+                get() = smodify_letiarrstorage.isEmpty
 
             internal constructor(a: MS, b: Array<MS>) {
                 letms = a.sref() // sref when assign to let

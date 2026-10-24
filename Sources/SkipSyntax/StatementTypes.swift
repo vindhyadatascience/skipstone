@@ -1051,6 +1051,7 @@ final class FunctionDeclaration: Statement {
             isAsync: asyncBehavior != .sync,
             isConcurrent: attributes.contains(.concurrent),
             isNonisolatedNonsending: modifiers.isNonisolatedNonsending,
+            isMutating: modifiers.isMutating,
             throwsType: throwsType
         )
         let function: TypeSignature = .function(parameters.map(\.signature), returnType, apiFlags, nil)
@@ -1246,10 +1247,12 @@ final class ImportDeclaration: Statement {
     let modulePath: [String]
     /// Whether the import is marked `@_exported`, meaning Swift will re-export the imported module's API as part of the importing module.
     let isExported: Bool
+    let isTestable: Bool
 
-    init(modulePath: [String], isExported: Bool = false, syntax: SyntaxProtocol? = nil, sourceFile: Source.FilePath? = nil, sourceRange: Source.Range? = nil, extras: StatementExtras? = nil) {
+    init(modulePath: [String], isExported: Bool = false, isTestable: Bool = false, syntax: SyntaxProtocol? = nil, sourceFile: Source.FilePath? = nil, sourceRange: Source.Range? = nil, extras: StatementExtras? = nil) {
         self.modulePath = modulePath
         self.isExported = isExported
+        self.isTestable = isTestable
         super.init(type: .importDeclaration, syntax: syntax, sourceFile: sourceFile, sourceRange: sourceRange, extras: extras)
     }
 
@@ -1262,7 +1265,11 @@ final class ImportDeclaration: Statement {
             guard let attribute = element.as(AttributeSyntax.self) else { return false }
             return attribute.attributeName.description.trimmingCharacters(in: .whitespaces) == "_exported"
         })
-        let statement = ImportDeclaration(modulePath: modulePath, isExported: isExported, syntax: syntax, sourceFile: syntaxTree.source.file, sourceRange: syntax.range(in: syntaxTree.source), extras: extras)
+        let isTestable = importDecl.attributes.contains(where: { element in
+            guard let attribute = element.as(AttributeSyntax.self) else { return false }
+            return attribute.attributeName.description.trimmingCharacters(in: .whitespaces) == "testable"
+        })
+        let statement = ImportDeclaration(modulePath: modulePath, isExported: isExported, isTestable: isTestable, syntax: syntax, sourceFile: syntaxTree.source.file, sourceRange: syntax.range(in: syntaxTree.source), extras: extras)
         return [statement]
     }
 
@@ -1271,6 +1278,7 @@ final class ImportDeclaration: Statement {
         if isExported {
             label = "@_exported " + label
         }
+        if isTestable { label = "@testable " + label }
         return [PrettyPrintTree(root: label)]
     }
 }
@@ -1716,16 +1724,114 @@ class TypeDeclaration: Statement {
         return type
     }
 
+    /// Original lexical parameter positions, before any Kotlin capture pruning.
+    var enclosingTypeGenericEntries: [Generic] {
+        guard !isLocalType else { return [] }
+        var chain: [TypeDeclaration] = []
+        var outer = parent?.owningTypeDeclaration
+        while let declaration = outer {
+            chain.insert(declaration, at: 0)
+            outer = declaration.parent?.owningTypeDeclaration
+        }
+        return chain.flatMap { $0.generics.resolvingSelf(in: $0).entries }
+    }
+
+    /// Capture referenced enclosing parameters, respecting lexical shadowing.
+    /// Nested declarations calculate their own independent static Kotlin ABI.
+    var kotlinCapturedOuterGenericIndices: [Int] {
+        let entries = enclosingTypeGenericEntries
+        let ownNames = Set(generics.entries.map(\.name))
+        var candidates: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() where !ownNames.contains(entry.name) {
+            candidates[entry.name] = index // Nearest enclosing binding wins.
+        }
+        guard !candidates.isEmpty else { return [] }
+        var captured: Set<Int> = []
+        func referencesCapturedParameter(_ type: TypeSignature, target: TypeSignature) -> Bool {
+            var references = false
+            type.visit { candidate in
+                let nominal = candidate.asTypealiased(nil).withoutOptionality().asMetaType(false)
+                if nominal.isNamedType && nominal.withGenerics([]).isSameType(as: signature.withGenerics([])) {
+                    // The implicit enclosing arguments in self/Self/own-type
+                    // identity do not capture values. Explicit own arguments
+                    // still matter: Inner<T> can reference an enclosing T.
+                    references = references || nominal.generics.contains { referencesCapturedParameter($0, target: target) }
+                    return .skip
+                }
+                if case .member(let base, _) = nominal,
+                   base.withGenerics([]).isSameType(as: signature.withGenerics([])) {
+                    // A separate descendant type reference retains its lexical
+                    // enclosing bindings; it is not the own nominal self value.
+                    references = references || candidate.referencesType(target)
+                    return .skip
+                }
+                if candidate == target { references = true; return .skip }
+                return .recurse(nil)
+            }
+            return references
+        }
+        func inspect(_ node: SyntaxNode, hidden: Set<String>) {
+            if let nested = node as? TypeDeclaration, nested !== self { return }
+            var hidden = hidden
+            var types: [TypeSignature] = []
+            if let function = node as? FunctionDeclaration {
+                hidden.formUnion(function.generics.entries.map(\.name))
+                types.append(function.functionType)
+                for entry in function.generics.entries {
+                    types += entry.inherits
+                    if let equal = entry.whereEqual { types.append(equal) }
+                }
+            } else if let variable = node as? VariableDeclaration {
+                types.append(variable.propertyType)
+            } else if let subscriptDeclaration = node as? SubscriptDeclaration {
+                types.append(subscriptDeclaration.elementType)
+                types += subscriptDeclaration.parameters.map(\.declaredType)
+            } else if let enumCase = node as? EnumCaseDeclaration {
+                types += enumCase.associatedValues.map(\.declaredType)
+            } else if let alias = node as? TypealiasDeclaration {
+                types.append(alias.aliasedType)
+            } else if node is Expression {
+                types.append(node.inferredType)
+            }
+            if node === self {
+                types += inherits
+                for entry in generics.entries {
+                    types += entry.inherits
+                    if let equal = entry.whereEqual { types.append(equal) }
+                }
+            }
+            for (name, position) in candidates where !hidden.contains(name) {
+                if types.contains(where: { referencesCapturedParameter($0, target: .named(name, [])) }) { captured.insert(position) }
+            }
+            node.children.forEach { inspect($0, hidden: hidden) }
+        }
+        inspect(self, hidden: [])
+        return captured.sorted()
+    }
+
+    /// Kotlin's static nested declaration carries only its captured parameters.
+    var enclosingTypeGenerics: Generics {
+        let entries = enclosingTypeGenericEntries
+        return Generics(entries: kotlinCapturedOuterGenericIndices.map { entries[$0] })
+    }
+
+    /// Swift local types have static members and value semantics which cannot be
+    /// represented by Kotlin local classes. Emit a private, uniquely named type.
+    var isLocalType: Bool { parent?.owningFunctionDeclaration != nil }
+
     override func qualifyTypeDeclaration() {
         if _signature == nil {
-            _signature = qualifyDeclaredType(signature)
+            if isLocalType {
+                let file = (sourceFile?.name ?? "Source").map { $0.isLetter || $0.isNumber ? String($0) : "_" }.joined()
+                let position = sourceRange?.start ?? Source.Position(line: 0, column: 0)
+                _signature = .named("Local_" + file + "_\(position.line)_\(position.column)_" + name, generics.entries.map(\.namedType))
+            } else {
+                _signature = qualifyDeclaredType(signature)
+            }
         }
     }
 
     override func resolveAttributes(in syntaxTree: SyntaxTree, context: TypeResolutionContext) {
-        if parent?.owningFunctionDeclaration != nil {
-            messages.append(.localTypesNotSupported(self, source: syntaxTree.source))
-        }
         inherits = inherits.map { $0.resolved(in: self, context: context) }
         if modifiers.visibility == .default {
             // Types in extensions inherit the visibility of the extension

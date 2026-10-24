@@ -204,8 +204,10 @@ final class BuiltinTypeTests: XCTestCase {
         internal val z = Float(1 * 2)
         """)
 
-        try await checkProducesMessage(swift: """
+        try await check(swift: """
         let x: Float = 1.0
+        """, kotlin: """
+        internal val x: Float = 1.0f
         """)
 
         try await check(swift: """

@@ -31,6 +31,8 @@ struct APIMatch {
     var memberOf: (declaringType: TypeSignature, selfType: TypeSignature?)?
     var attributes: Attributes?
     var availability: Availability = .available
+    /// A supplied final argument precedes omitted default parameters in the declaration.
+    var hasOmittedTrailingParameters = false
 }
 
 /// Flags that affect API calls.
@@ -53,13 +55,16 @@ struct APIFlags: Hashable, Codable {
         static let computed = Options(rawValue: 1 << 7)
         static let concurrent = Options(rawValue: 1 << 8)
         static let nonisolatedNonsending = Options(rawValue: 1 << 9)
+        static let mutating = Options(rawValue: 1 << 10)
+        static let scopedModify = Options(rawValue: 1 << 11)
+        static let scopedCollectionRead = Options(rawValue: 1 << 12)
 
         init(rawValue: Int) {
             self.rawValue = rawValue
         }
     }
 
-    init(isAsync: Bool = false, isMainActor: Bool = false, isSwiftUIBindable: Bool = false, isViewBuilder: Bool = false, isComputed: Bool = false, isWriteable: Bool = false, isConcurrent: Bool = false, isNonisolatedNonsending: Bool = false, throwsType: TypeSignature = .none) {
+    init(isAsync: Bool = false, isMainActor: Bool = false, isSwiftUIBindable: Bool = false, isViewBuilder: Bool = false, isComputed: Bool = false, isWriteable: Bool = false, isConcurrent: Bool = false, isNonisolatedNonsending: Bool = false, isMutating: Bool = false, throwsType: TypeSignature = .none) {
         if isAsync {
             options.insert(.async)
         }
@@ -83,6 +88,9 @@ struct APIFlags: Hashable, Codable {
         }
         if isNonisolatedNonsending {
             options.insert(.nonisolatedNonsending)
+        }
+        if isMutating {
+            options.insert(.mutating)
         }
         if throwsType != .none {
             self.throwsType = throwsType
@@ -109,7 +117,10 @@ struct ArgumentValue: Hashable {
     var type: TypeSignature
     var isLiteral = false
     var isInterpolated = false
+    var isSingleGraphemeLiteral = false
     var isFirstTrailingClosure = false
+    var isArrayLiteral = false
+    var isNumericLiteral = false
 }
 
 /// A variable or function's async behavior.
@@ -1214,6 +1225,14 @@ extension Array where Element == Statement {
                 return nil
             }
             return importDeclaration.modulePath
+        }
+    }
+
+    /// Parse explicit testing imports without inferring access from module names.
+    var testableImportedModulePaths: [[String]] {
+        compactMap { statement in
+            guard let declaration = statement as? ImportDeclaration, declaration.isTestable else { return nil }
+            return declaration.modulePath
         }
     }
 

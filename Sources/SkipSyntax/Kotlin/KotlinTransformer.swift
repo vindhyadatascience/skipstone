@@ -68,6 +68,7 @@ public let builtinKotlinTransformerTypes: [KotlinTransformer.Type] = [
     // May change the names of stored properties, but adds computed wrapper properties with the previous names. Requires
     // knowledge of all constructors, including added constructors
     KotlinObservationTransformer.self,
+    KotlinCollectionModifyTransformer.self,
     KotlinIfWhenTransformer.self,
     KotlinDeferTransformer.self,
     KotlinDisambiguateFunctionsTransformer.self,

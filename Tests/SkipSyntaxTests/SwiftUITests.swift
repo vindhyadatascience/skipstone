@@ -35,6 +35,8 @@ final class SwiftUITests: XCTestCase {
     struct TextField: View {
         init(_ text: Binding<String>) {
         }
+        init(_ title: String, text: Binding<String>) {
+        }
     }
 
     struct Button: View {
@@ -1379,7 +1381,7 @@ final class SwiftUITests: XCTestCase {
                 return super.Evaluate(context, options)
             }
 
-            constructor(text: String = "") {
+            internal constructor(text: String = "") {
                 this._text = skip.ui.State(text)
             }
 
@@ -2238,7 +2240,7 @@ final class SwiftUITests: XCTestCase {
         import SwiftUI
         struct MyV: View {
             var body: some View {
-                VStack().environment(\\.font, .body)
+                VStack { Text("value") }.environment(\\.font, .body)
             }
         }
         """, kotlin: """
@@ -2256,7 +2258,12 @@ final class SwiftUITests: XCTestCase {
         internal class MyV: View {
             override fun body(): View {
                 return ComposeBuilder { composectx: ComposeContext ->
-                    VStack().environment({ it -> EnvironmentValues.shared.setfont(it) }, Font.body).Compose(composectx)
+                    VStack { ->
+                        ComposeBuilder { composectx: ComposeContext ->
+                            Text("value").Compose(composectx)
+                            ComposeResult.ok
+                        }
+                    }.environment({ it -> EnvironmentValues.shared.setfont(it) }, Font.body).Compose(composectx)
                 }
             }
         }

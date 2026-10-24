@@ -115,7 +115,9 @@ extension KotlinMemberDeclaration {
             output.append(extends.0.withGenerics([]).kotlin)
             extends.1.append(to: output, indentation: indentation)
         case .object:
-            output.append(extends.0.withGenerics([]).kotlin)
+            // Companion is static even when its owner carries captured type
+            // parameters. Do not re-inject those onto this qualifier.
+            output.append(KotlinNestedTypeGenerics.qualifierName(extends.0))
             output.append(".Companion")
         case .class(let signature):
             output.append(signature.kotlin)

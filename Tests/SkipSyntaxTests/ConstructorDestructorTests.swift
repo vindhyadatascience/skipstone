@@ -353,18 +353,32 @@ final class ConstructorDestructorTests: XCTestCase {
             var i = 100
         }
         """, kotlin: """
+        import skip.lib.InOut
+
         @Suppress("MUST_BE_INITIALIZED")
         internal class S1: MutableStruct {
             internal val a: Int
             private val b: Int
             internal var c: S3
-                get() = field.sref({ this.c = it })
+                get() = smodify_cstorage.sref({ this.c = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_cstorage = newValue
                     didmutate()
                 }
+            private lateinit var smodify_cstorage: S3
+            internal fun <R> smodify_c(body: (InOut<S3>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_cstorage }, { smodify_cstorage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
             private var d: Int
                 set(newValue) {
                     willmutate()
@@ -394,18 +408,29 @@ final class ConstructorDestructorTests: XCTestCase {
             override var smutatingcount = 0
             override fun scopy(): MutableStruct = S1(this as MutableStruct)
         }
-        @Suppress("MUST_BE_INITIALIZED")
         internal class S2: MutableStruct {
             internal val a: Int
             private val b: Int
             internal var c: S3
-                get() = field.sref({ this.c = it })
+                get() = smodify_cstorage.sref({ this.c = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_cstorage = newValue
                     didmutate()
                 }
+            private lateinit var smodify_cstorage: S3
+            internal fun <R> smodify_c(body: (InOut<S3>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_cstorage }, { smodify_cstorage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
             private var d = 200
                 set(newValue) {
                     willmutate()
@@ -1054,16 +1079,17 @@ final class ConstructorDestructorTests: XCTestCase {
         }
         """, kotlin: """
         import skip.lib.Array
+        import skip.lib.InOut
 
         internal class S: MutableStruct {
             internal var i: Int
-            internal var a: Array<String> = arrayOf()
-                get() = field.sref({ this.a = it })
+            internal var a: Array<String>
+                get() = smodify_astorage.sref({ this.a = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
                     try {
-                        field = newValue
+                        smodify_astorage = newValue
                         if (!suppresssideeffects) {
                             print("didset")
                         }
@@ -1071,6 +1097,25 @@ final class ConstructorDestructorTests: XCTestCase {
                         didmutate()
                     }
                 }
+            private var smodify_astorage: Array<String> = arrayOf()
+            internal fun <R> smodify_a(body: (InOut<Array<String>>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_astorage }, { smodify_astorage = it.sref() }))
+                } finally {
+                    try {
+                        if (!suppresssideeffects) {
+                            print("didset")
+                        }
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
+            internal val sread_a_count: Int
+                get() = smodify_astorage.count
+            internal val sread_a_isEmpty: Boolean
+                get() = smodify_astorage.isEmpty
 
             internal constructor(i: Int) {
                 suppresssideeffects = true

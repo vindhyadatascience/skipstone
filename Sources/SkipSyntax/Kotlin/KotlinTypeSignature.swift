@@ -63,8 +63,10 @@ extension TypeSignature {
         case .int128:
             return "BigInteger"
         case .member(let baseType, let type):
-            // Erase generics of outer type because Kotlin inner types do not inherit them
-            return "\(baseType.withGenerics([]).kotlin).\(type.kotlin)"
+            // Render the same captured ABI as the declaration; actual equal
+            // arguments remain distinct when they bind distinct parameters.
+            let lifted = type.withGenerics(KotlinNestedTypeGenerics.typeArguments(for: signature))
+            return "\(KotlinNestedTypeGenerics.qualifierName(baseType)).\(lifted.kotlin)"
         case .metaType(let baseType):
             if baseType == .any {
                 return "KClass<*>"
@@ -80,6 +82,10 @@ extension TypeSignature {
         case .none:
             return "*" // For when output as part of generic parameters
         case .optional(let type):
+            // Preserve static Optional depth in Swift metadata. Kotlin's existing
+            // nullable representation has one level; consumers needing presence
+            // (such as AnyHashable erasure) diagnose unsupported nested values.
+            if type.isOptional { return type.kotlin }
             switch type {
             case .function:
                 return "(\(type.kotlin))?"

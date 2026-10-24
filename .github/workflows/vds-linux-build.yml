@@ -1,0 +1,214 @@
+name: VDS native Linux artifacts
+
+on:
+  push:
+    branches:
+      - qa/fiea26-skipstone-latest
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact published skipstone source commit (40 lowercase hex characters)
+        required: true
+        type: string
+      version:
+        description: Exact version already embedded in that source (for example 1.9.19-vds.2)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vds-linux-${{ github.event_name }}-${{ inputs.source_sha || github.sha }}-${{ inputs.version || '1.9.19-vds.2' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.inputs.outputs.source_sha }}
+      version: ${{ steps.inputs.outputs.version }}
+    steps:
+      - name: Validate immutable source inputs
+        id: inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_VERSION: ${{ inputs.version }}
+          PUSH_SOURCE_SHA: ${{ github.sha }}
+          PUSH_REF: ${{ github.ref }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          event = os.environ['EVENT_NAME']
+          if event == 'push':
+              if os.environ['PUSH_REF'] != 'refs/heads/qa/fiea26-skipstone-latest':
+                  raise SystemExit('Push builds are restricted to the owned QA branch')
+              source, version = os.environ['PUSH_SOURCE_SHA'], '1.9.19-vds.2'
+          elif event == 'workflow_dispatch':
+              source, version = os.environ['SOURCE_SHA'], os.environ['SOURCE_VERSION']
+          else:
+              raise SystemExit('Only owned QA pushes and explicit workflow dispatch are supported')
+          if not re.fullmatch(r'[0-9a-f]{40}', source):
+              raise SystemExit('source_sha must be a complete lowercase commit SHA')
+          if not re.fullmatch(r'\d+\.\d+\.\d+-vds\.\d+', version):
+              raise SystemExit('version must be an exact VDS source version')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'source_sha={source}\nversion={version}\n')
+          PY
+
+  native:
+    needs: validate
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      SKIP_VERSION: ${{ needs.validate.outputs.version }}
+      NATIVE_ARCH: ${{ matrix.arch }}
+      SWIFT_VERSION: '6.4.0'
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Checkout exact source and pinned submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          path: source
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify native architecture and embedded source version
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$NATIVE_ARCH"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 - <<'PY'
+          import os, pathlib, re
+          versions = re.findall(r'public let skipVersion = "([^"]+)"', pathlib.Path('Sources/SkipSyntax/Version.swift').read_text())
+          if versions != [os.environ['SKIP_VERSION']]:
+              raise SystemExit('The source version must already match; this workflow never stamps source')
+          PY
+          git diff --exit-code
+          mkdir -p "$RUNNER_TEMP/vds-linux-logs"
+
+      - name: Install matching native Swift toolchain and static Linux SDK
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl git unzip zip binutils clang libcurl4-openssl-dev libxml2-dev libsqlite3-dev libncurses-dev libedit-dev pkg-config zlib1g-dev
+          mkdir -p "$RUNNER_TEMP/swiftly-bootstrap"
+          curl --fail --show-error --location --retry 5 \
+            "https://download.swift.org/swiftly/linux/swiftly-${NATIVE_ARCH}.tar.gz" \
+            --output "$RUNNER_TEMP/swiftly.tar.gz"
+          tar -xzf "$RUNNER_TEMP/swiftly.tar.gz" -C "$RUNNER_TEMP/swiftly-bootstrap"
+          "$RUNNER_TEMP/swiftly-bootstrap/swiftly" init --skip-install --assume-yes --quiet-shell-followup
+          . "$HOME/.local/share/swiftly/env.sh"
+          swiftly install --assume-yes --use "$SWIFT_VERSION"
+          swiftly run swift --version | tee "$RUNNER_TEMP/vds-linux-logs/swift-version.log"
+          curl --fail --show-error --location --retry 5 \
+            "https://download.swift.org/swift-${SWIFT_VERSION}-release/static-sdk/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz" \
+            --output "$RUNNER_TEMP/swift-static-linux-sdk.tar.gz"
+          swiftly run swift sdk install "$RUNNER_TEMP/swift-static-linux-sdk.tar.gz"
+          echo "$HOME/.local/share/swiftly/bin" >> "$GITHUB_PATH"
+          sha256sum "$RUNNER_TEMP/swiftly.tar.gz" "$RUNNER_TEMP/swift-static-linux-sdk.tar.gz" \
+            > "$RUNNER_TEMP/vds-linux-logs/bootstrap-sha256.txt"
+
+      - name: Run compiler and packaging regression suites
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_vds_linux_artifact.py -v \
+            2>&1 | tee "$RUNNER_TEMP/vds-linux-logs/packaging-tests.log"
+          swiftly run swift test --jobs 2 --force-resolved-versions --filter 'SkipSyntaxTests|TestingFriendshipTests' \
+            2>&1 | tee "$RUNNER_TEMP/vds-linux-logs/compiler-tests.log"
+          python3 - <<'PY'
+          import os, pathlib, re
+          log = pathlib.Path(os.environ['RUNNER_TEMP'], 'vds-linux-logs/compiler-tests.log').read_text()
+          counts = [(int(total), int(failed)) for total, failed in re.findall(r'Executed (\d+) tests?, with (\d+) failures?', log)]
+          if not any(total > 0 for total, _ in counts) or any(failed for _, failed in counts):
+              raise SystemExit('Compiler test evidence must contain executed tests and no failures')
+          PY
+          git diff --exit-code -- Package.resolved
+
+      - name: Build the static executable for this native architecture
+        env:
+          USE_SWIFTLY: '1'
+        run: |
+          set -euo pipefail
+          bash scripts/build_linux_plugin.sh --arch "$NATIVE_ARCH" \
+            2>&1 | tee "$RUNNER_TEMP/vds-linux-logs/static-build.log"
+          git diff --exit-code -- Package.resolved
+
+      - name: Smoke test packaged executable and record exact producer provenance
+        run: |
+          set -euo pipefail
+          python3 scripts/vds_linux_artifact.py receipt \
+            --source "$SOURCE_SHA" --version "$SKIP_VERSION" --arch "$NATIVE_ARCH" \
+            --output "$RUNNER_TEMP/vds-linux-native-$NATIVE_ARCH"
+          cp "$RUNNER_TEMP/vds-linux-logs/"* "$RUNNER_TEMP/vds-linux-native-$NATIVE_ARCH/"
+
+      - name: Upload verified native artifact and receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: vds-linux-native-${{ needs.validate.outputs.source_sha }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/vds-linux-native-${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain logs for failed native gates
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: vds-linux-failed-logs-${{ needs.validate.outputs.source_sha }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/vds-linux-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  combine:
+    needs: [validate, native]
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      SKIP_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout the identical source for its receipt verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Download both native producers from this workflow run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: vds-linux-native-${{ needs.validate.outputs.source_sha }}-*
+          path: ${{ runner.temp }}/vds-linux-native-inputs
+          merge-multiple: false
+
+      - name: Combine only verified identical-source architecture receipts
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 scripts/vds_linux_artifact.py combine \
+            --source "$SOURCE_SHA" --version "$SKIP_VERSION" \
+            --inputs "$RUNNER_TEMP/vds-linux-native-inputs" \
+            --output "$RUNNER_TEMP/vds-linux-combined"
+
+      - name: Upload multiarchitecture bundle for manual review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: vds-linux-combined-${{ needs.validate.outputs.source_sha }}
+          path: ${{ runner.temp }}/vds-linux-combined/
+          if-no-files-found: error
+          retention-days: 30

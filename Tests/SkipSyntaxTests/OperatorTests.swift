@@ -32,7 +32,7 @@ final class OperatorTests: XCTestCase {
             return a * b + 2 == .myZero
         }
         """, kotlin: """
-        internal fun op(a: Double, b: Double): Boolean = a * b + 2 == Double.myZero
+        internal fun op(a: Double, b: Double): Boolean = a * b + 2.0 == Double.myZero
         """)
     }
 

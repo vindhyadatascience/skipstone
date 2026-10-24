@@ -814,6 +814,31 @@ final class KotlinTryCatch: KotlinStatement {
     static func translate(statement: DoCatch, translator: KotlinTranslator) -> KotlinTryCatch {
         let matchOn = KotlinIdentifier(name: "error")
         matchOn.isLocalOrSelfIdentifier = true
+        if statement.catches.contains(where: { $0.patterns.contains(where: { $0.whereGuard != nil }) }) {
+            var cases: [KotlinCase] = []
+            var messages: [Message] = []
+            var target: KotlinTargetVariable? = nil
+            for catchCase in statement.catches {
+                let (translated, diagnostics) = KotlinCase.translate(expression: catchCase, matchingOn: matchOn, isSealedClassesEnum: true, caseTargetVariable: &target, translator: translator)
+                cases.append(translated)
+                messages += diagnostics
+            }
+            if !statement.catches.contains(where: { $0.patterns.isEmpty }) {
+                cases.append(KotlinCase(patterns: [], body: KotlinCodeBlock(statements: [KotlinRawStatement(sourceCode: "throw caughtError")])))
+            }
+            let matching = KotlinWhen(on: matchOn, cases: cases)
+            matching.hasNonNilMatches = true
+            let catchBody = KotlinCodeBlock(statements: [
+                KotlinRawStatement(sourceCode: "val error = caughtError.aserror()"),
+                KotlinExpressionStatement(expression: matching)
+            ])
+            let catchPattern = KotlinBinaryOperator(op: .with(symbol: "is"), lhs: KotlinIdentifier(name: "caughtError"), rhs: KotlinIdentifier(name: "Throwable"))
+            let body = KotlinCodeBlock.translate(statement: statement.body, translator: translator)
+            body.catches = [KotlinCase(patterns: [catchPattern], body: catchBody)]
+            let translated = KotlinTryCatch(statement: statement, body: body)
+            translated.messages += messages
+            return translated
+        }
         var kcatches: [KotlinCase] = []
         var messages: [Message] = []
         var caseTargetVariable: KotlinTargetVariable? = nil
@@ -986,6 +1011,7 @@ final class KotlinWhileLoop: KotlinStatement {
 // MARK: - Declarations
 
 final class KotlinClassDeclaration: KotlinStatement {
+    var isLocalType = false
     var name: String
     var signature: TypeSignature
     var inherits: [TypeSignature] = []
@@ -1024,12 +1050,10 @@ final class KotlinClassDeclaration: KotlinStatement {
 
     static func translate(statement: TypeDeclaration, translator: KotlinTranslator) -> [KotlinStatement] {
         let kstatement = KotlinClassDeclaration(statement: statement)
+        kstatement.isLocalType = statement.isLocalType
         kstatement.inherits = statement.inherits
         kstatement.modifiers = statement.modifiers
         kstatement.generics = statement.generics.resolvingSelf(in: statement)
-        if let owningTypeDeclaration = statement.parent?.owningTypeDeclaration, !owningTypeDeclaration.generics.isEmpty {
-            kstatement.messages.append(.kotlinGenericTypeNested(statement, source: translator.syntaxTree.source))
-        }
         kstatement.attributes = kstatement.processAttributes(statement.attributes, from: statement, translator: translator)
         if statement.type == .enumDeclaration {
             if let codebaseInfo = translator.codebaseInfo {
@@ -1051,6 +1075,8 @@ final class KotlinClassDeclaration: KotlinStatement {
                 kstatement.inherits = typeInfo.inherits
                 kstatement.generics = typeInfo.generics.resolvingSelf(in: statement)
             }
+
+            kstatement.generics = KotlinNestedTypeGenerics.capturedGenerics(of: statement, context: translator.codebaseInfo).merge(overrides: kstatement.generics, addNew: true)
 
             // Move extensions of this type into the type itself rather than use Kotlin extension functions.
             // Kotlin extension functions act like static functions, which can lead to different behavior
@@ -1117,7 +1143,7 @@ final class KotlinClassDeclaration: KotlinStatement {
     }
 
     private init(statement: TypeDeclaration) {
-        self.name = statement.name
+        self.name = statement.isLocalType ? statement.signature.name : statement.name
         self.signature = statement.signature
         self.declarationType = statement.type
         super.init(type: .classDeclaration, statement: statement)
@@ -1447,7 +1473,8 @@ final class KotlinEnumCaseDeclaration: KotlinStatement {
         kstatement.rawValue = statement.rawValue.map { translator.translateExpression($0) }
         kstatement.rawValueSwift = statement.rawValueSwift
         if let owningTypeDeclaration = statement.owningTypeDeclaration {
-            let genericsEntries = owningTypeDeclaration.generics.resolvingSelf(in: statement).entries.map { entry in
+            let allGenerics = KotlinNestedTypeGenerics.capturedGenerics(of: owningTypeDeclaration, context: translator.codebaseInfo).merge(overrides: owningTypeDeclaration.generics.resolvingSelf(in: statement), addNew: true)
+            let genericsEntries = allGenerics.entries.map { entry in
                 if kstatement.associatedValues.contains(where: { $0.declaredType.referencesType(entry.namedType) }) {
                     return entry
                 } else {
@@ -2806,6 +2833,10 @@ final class KotlinVariableDeclaration: KotlinStatement, KotlinMemberDeclaration 
     var suppressSideEffectsPropertyName: String?
     var mutationFunctionNames: (willMutate: String, didMutate: String)?
     var storage: KotlinVariableStorage?
+    /// A scoped raw-storage accessor, generated only for proven stored-value mutations.
+    var collectionModifyName: String?
+    /// Nonescaping count/isEmpty getters; ordinary collection reads still sref.
+    var collectionReadNames: (count: String, isEmpty: String)?
     var isGenerated = false
     var isAppendAsFunction: Bool {
         return (apiFlags.options.contains(.viewBuilder) && apiFlags.options.contains(.computed) && !propertyType.isFunction) || (apiFlags.options.contains(.async) && !isAsyncLet)
@@ -2997,6 +3028,9 @@ final class KotlinVariableDeclaration: KotlinStatement, KotlinMemberDeclaration 
 
     override func insertDependencies(into dependencies: inout KotlinDependencies) {
         declaredType.insertDependencies(into: &dependencies)
+        if collectionModifyName != nil {
+            dependencies.insertSkipLibType("InOut")
+        }
         // Include implicit property types in case a transformer uses it as a declared type
         if declaredType == .none && role == .property && propertyType != .none {
             propertyType.insertDependencies(into: &dependencies)
@@ -3051,6 +3085,12 @@ final class KotlinVariableDeclaration: KotlinStatement, KotlinMemberDeclaration 
             appendPropertySetter(to: output, indentation: indentation, storage: storage)
         }
         storage?.appendStorage(self, output, indentation)
+        if let collectionModifyName {
+            appendCollectionModify(named: collectionModifyName, to: output, indentation: indentation)
+            if let collectionReadNames {
+                appendCollectionScalarReads(names: collectionReadNames, storageName: collectionModifyName + "storage", to: output, indentation: indentation)
+            }
+        }
         if modifiers.isLazy && !isLateInit {
             output.append(indentation).append("private var \(KotlinVariableStorage.isLazyInitialized(self)) = false\n")
         }
@@ -3402,6 +3442,19 @@ final class KotlinVariableDeclaration: KotlinStatement, KotlinMemberDeclaration 
             return nil
         }
 
+        if let collectionModifyName {
+            let name = collectionModifyName + "storage"
+            return KotlinVariableStorage(access: name) { variable, output, indentation in
+                output.append(indentation).append("private ")
+                if variable.value == nil && !variable.propertyType.isOptional {
+                    output.append("lateinit ")
+                }
+                output.append("var \(name): \(variable.propertyType.kotlin)")
+                variable.appendInitialValue(to: output, indentation: indentation)
+                output.append("\n")
+            }
+        }
+
         // Lazy?
         if modifiers.isLazy {
             let name = KotlinVariableStorage.lazyStorageName(self)
@@ -3456,6 +3509,58 @@ final class KotlinVariableDeclaration: KotlinStatement, KotlinMemberDeclaration 
         }
 
         return nil
+    }
+
+    /// Unlike an ordinary read, a modify access borrows the stored wrapper. Existing external
+    /// aliases still trigger the collection's normal CoW. Replacement also retains value semantics.
+    /// Observation happens once when the scoped access ends, including exceptional exits.
+    private func appendCollectionModify(named name: String, to output: OutputGenerator, indentation: Indentation) {
+        let bodyIndentation = indentation.inc()
+        let finallyIndentation = bodyIndentation.inc()
+        let isPublic = (visibility == .public || visibility == .open) &&
+            (modifiers.setVisibility == .default || modifiers.setVisibility == .public || modifiers.setVisibility == .open)
+        output.append(indentation).append("\(isPublic ? "public" : "internal") fun <R> \(name)(body: (InOut<\(propertyType.kotlin)>) -> R): R {\n")
+        if let mutationFunctionNames {
+            output.append(bodyIndentation).append("\(mutationFunctionNames.willMutate)()\n")
+        }
+        output.append(bodyIndentation).append("try {\n")
+        output.append(finallyIndentation).append("return body(InOut({ \(name)storage }, { \(name)storage = it.sref() }))\n")
+        output.append(bodyIndentation).append("} finally {\n")
+        if mutationFunctionNames != nil {
+            output.append(finallyIndentation).append("try {\n")
+        }
+        let observerIndentation = mutationFunctionNames == nil ? finallyIndentation : finallyIndentation.inc()
+        if let didSetBody = didSet?.body {
+            if let suppressSideEffectsPropertyName {
+                output.append(observerIndentation).append("if (!\(suppressSideEffectsPropertyName)) {\n")
+                output.append(didSetBody, indentation: observerIndentation.inc())
+                output.append(observerIndentation).append("}\n")
+            } else {
+                output.append(didSetBody, indentation: observerIndentation)
+            }
+        }
+        if let mutationFunctionNames {
+            output.append(finallyIndentation).append("} finally {\n")
+            output.append(finallyIndentation.inc()).append("\(mutationFunctionNames.didMutate)()\n")
+            output.append(finallyIndentation).append("}\n")
+        }
+        output.append(bodyIndentation).append("}\n")
+        output.append(indentation).append("}\n")
+    }
+
+    /// These readers return only primitive scalars. They neither expose the
+    /// stored wrapper nor run setter/observer/struct mutation callbacks.
+    private func appendCollectionScalarReads(names: (count: String, isEmpty: String), storageName: String, to output: OutputGenerator, indentation: Indentation) {
+        let access: String
+        switch visibility {
+        case .private: access = "private"
+        case .public, .open: access = "public"
+        case .fileprivate, .default, .internal: access = "internal"
+        }
+        output.append(indentation).append("\(access) val \(names.count): Int\n")
+        output.append(indentation.inc()).append("get() = \(storageName).count\n")
+        output.append(indentation).append("\(access) val \(names.isEmpty): Boolean\n")
+        output.append(indentation.inc()).append("get() = \(storageName).isEmpty\n")
     }
 
     private func canDeclareInitialValue(with storage: KotlinVariableStorage?) -> Bool {

@@ -166,6 +166,9 @@ class SyntaxNode: SourceDerived, PrettyPrintable {
     ///
     /// - Returns: A qualified type or a typealiased type signature whose type must then be resolved.
     final func qualifyReferencedNamedType(name: String, generics: [TypeSignature], context: TypeResolutionContext) -> (qualified: TypeSignature, isGenericParameter: Bool) {
+        if let declaration = localType(named: name) {
+            return (declaration.signature.withGenerics(generics), false)
+        }
         // Is this type a generic of the enclosing function?
         if generics.isEmpty, let owningFunction = owningFunctionDeclaration as? FunctionDeclaration {
             if let generic = owningFunction.generics.entries.first(where: { $0.name == name }) {
@@ -200,6 +203,19 @@ class SyntaxNode: SourceDerived, PrettyPrintable {
         } else {
             return (type, false)
         }
+    }
+
+    /// Find a lexically scoped type without exposing it to sibling functions.
+    final func localType(named name: String) -> TypeDeclaration? {
+        var scope: SyntaxNode? = self
+        while let node = scope {
+            if let block = node as? CodeBlock,
+               let declaration = block.statements.compactMap({ $0 as? TypeDeclaration }).first(where: { $0.isLocalType && $0.name == name }) {
+                return declaration
+            }
+            scope = node.parent
+        }
+        return nil
     }
 
     /// Traverse up the syntax tree to fully qualify a type name declared by a class, struct, etc.

@@ -95,16 +95,17 @@ final class ExpressionTests: XCTestCase {
         }
         """, kotlin: """
         import skip.lib.Array
+        import skip.lib.InOut
 
         internal class S: MutableStruct {
             internal var i: Int
-            internal var a: Array<String> = arrayOf()
-                get() = field.sref({ this.a = it })
+            internal var a: Array<String>
+                get() = smodify_astorage.sref({ this.a = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
                     try {
-                        field = newValue
+                        smodify_astorage = newValue
                         if (!suppresssideeffects) {
                             print("didset")
                         }
@@ -112,6 +113,25 @@ final class ExpressionTests: XCTestCase {
                         didmutate()
                     }
                 }
+            private var smodify_astorage: Array<String> = arrayOf()
+            internal fun <R> smodify_a(body: (InOut<Array<String>>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_astorage }, { smodify_astorage = it.sref() }))
+                } finally {
+                    try {
+                        if (!suppresssideeffects) {
+                            print("didset")
+                        }
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
+            internal val sread_a_count: Int
+                get() = smodify_astorage.count
+            internal val sread_a_isEmpty: Boolean
+                get() = smodify_astorage.isEmpty
 
             internal constructor(i: Int) {
                 suppresssideeffects = true

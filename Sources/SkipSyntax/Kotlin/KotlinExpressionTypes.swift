@@ -56,8 +56,12 @@ final class KotlinArrayLiteral: KotlinExpression, KotlinUsableAsTypeLiteral {
         kexpression.elements = expression.elements.map { translator.translateExpression($0) }
         kexpression.useMultilineFormatting = expression.useMultilineFormatting
         kexpression.inferredType = expression.inferredType.resolvingSelf(in: expression)
-        if case .array(let element) = expression.inferredType, let element {
-            kexpression.isOptionSet = translator.codebaseInfo?.global.protocolSignatures(forNamed: element).contains(where: \.isOptionSet) == true
+        // The element type alone cannot distinguish an option literal from
+        // an ordinary Array<OptionSet>. Only the literal's contextual type
+        // may request OptionSet.of, including when it is nested in an array.
+        let expected = expression.contextualType.asTypealiased(nil).withoutOptionality()
+        if expected.isNamedType {
+            kexpression.isOptionSet = translator.codebaseInfo?.global.protocolSignatures(forNamed: expected).contains(where: \.isOptionSet) == true
         }
         return kexpression
     }
@@ -214,12 +218,19 @@ final class KotlinBinaryOperator: KotlinExpression, KotlinSingleStatementVetoing
     var inferredType: TypeSignature = .none
 
     static func translate(expression: BinaryOperator, translator: KotlinTranslator) -> KotlinExpression {
+        if let special = KotlinStandardLibraryParity.translateExplicitHashableCast(expression: expression, translator: translator) {
+            return special
+        }
+        if let special = KotlinStandardLibraryParity.translateEquality(expression: expression, translator: translator) {
+            return special
+        }
         // Special case when assigning to _
         if expression.op.symbol == "=", let binding = expression.lhs as? Binding, binding.identifierPatterns.allSatisfy({ $0.name == nil }) {
             return translator.translateExpression(expression.rhs)
         }
         
-        let klhs = translator.translateExpression(expression.lhs)
+        let klhs = KotlinStandardLibraryParity.knownHashableCastLHS(expression: expression, translator: translator)
+            ?? translator.translateExpression(expression.lhs)
         var krhs = translator.translateExpression(expression.rhs)
         if expression.op.precedence == .assignment && assignmentRequiresSref(expression: expression) {
             krhs = krhs.sref()
@@ -421,15 +432,21 @@ struct KotlinCase {
     static func translate(expression: SwitchCase, matchingOn: KotlinExpression, isSealedClassesEnum: Bool, caseTargetVariable: inout KotlinTargetVariable?, translator: KotlinTranslator) -> (KotlinCase, [Message]) {
         var messages: [Message] = []
         let caseValues: [(KotlinExpression?, [KotlinBindingVariable])] = expression.patterns.map { pattern in
-            if let whereGuard = pattern.whereGuard {
-                messages.append(.kotlinWhenCaseWhere(whereGuard, source: translator.syntaxTree.source))
-            }
-            let (targetVariable, bindingVariables, condition, caseMessages) = KotlinCasePattern.translate(expression: pattern.pattern, target: caseTargetVariable?.identifier ?? matchingOn, isSealedClassesEnum: isSealedClassesEnum, translator: translator)
+            let (targetVariable, bindingVariables, patternCondition, caseMessages) = KotlinCasePattern.translate(expression: pattern.pattern, target: caseTargetVariable?.identifier ?? matchingOn, isSealedClassesEnum: isSealedClassesEnum, translator: translator)
             messages += caseMessages
 
             // If we find a case that requires a target variable, use it for the entire switch
             if caseTargetVariable == nil, let targetVariable {
                 caseTargetVariable = targetVariable
+            }
+            var condition = patternCondition
+            if let whereGuard = pattern.whereGuard {
+                let guardCondition = KotlinPatternGuard(bindings: bindingVariables, predicate: translator.translateExpression(whereGuard))
+                if let patternCondition {
+                    condition = KotlinBinaryOperator(op: .with(symbol: "&&"), lhs: patternCondition, rhs: guardCondition)
+                } else {
+                    condition = guardCondition
+                }
             }
             return (condition, bindingVariables)
         }
@@ -444,7 +461,7 @@ struct KotlinCase {
 
 /// - Note: This type is used to translate the ``CasePattern`` expression, but is not itself a `KotlinExpression`.
 struct KotlinCasePattern {
-    static func translate(expression: CasePattern, target: KotlinExpression, isSealedClassesEnum: Bool, translator: KotlinTranslator) -> (targetVariable: KotlinTargetVariable?, bindingVariables: [KotlinBindingVariable], condition: KotlinExpression?, messages: [Message]) {
+    static func translate(expression: CasePattern, target: KotlinExpression, isSealedClassesEnum: Bool, isStableTarget: Bool = false, translator: KotlinTranslator) -> (targetVariable: KotlinTargetVariable?, bindingVariables: [KotlinBindingVariable], condition: KotlinExpression?, messages: [Message]) {
         var targetVariable: KotlinTargetVariable? = nil
         var bindingVariables: [KotlinBindingVariable] = []
         var messages: [Message] = []
@@ -454,7 +471,7 @@ struct KotlinCasePattern {
             }
             // If we have bindings and our target is not a simple local identifier, create a new target variable so
             // that re-evaluating the target for our binding values won't cause side effects
-            if targetVariable == nil, (target as? KotlinIdentifier)?.isLocalOrSelfIdentifier != true {
+            if targetVariable == nil, !isStableTarget, (target as? KotlinIdentifier)?.isLocalOrSelfIdentifier != true {
                 targetVariable = KotlinTargetVariable(value: target)
             }
             let bindingBase = targetVariable.map { KotlinSharedExpressionPointer(shared: $0.identifier) } ?? target
@@ -504,33 +521,33 @@ struct KotlinCasePattern {
                 value = nil
             }
         case .functionCall:
-            // case .enum(let value)
             let functionCall = expression.value as! FunctionCall
-            if functionCall.function.type == .memberAccess {
-                var hasBindings = false
-                var hasNonBindings = false
+            if functionCall.function.type == .memberAccess && isSealedClassesEnum {
+                if !isStableTarget, (target as? KotlinIdentifier)?.isLocalOrSelfIdentifier != true {
+                    targetVariable = KotlinTargetVariable(value: target)
+                }
+                let stableTarget = targetVariable?.identifier ?? target
+                let caseType = translator.translateExpression(functionCall.function)
+                if let member = caseType as? KotlinMemberAccess {
+                    member.member = KotlinEnumCaseDeclaration.sealedClassName(for: member.member)
+                }
+                var condition: KotlinExpression = KotlinBinaryOperator(op: .with(symbol: "is"), lhs: stableTarget, rhs: caseType)
                 for (index, argument) in functionCall.arguments.enumerated() {
-                    guard let binding = argument.value as? Binding else {
-                        hasNonBindings = true
-                        continue
+                    if let binding = argument.value as? Binding {
+                        updateVariables(for: binding.identifierPatterns, types: binding.variableTypes, member: argument.label ?? "associated\(index)")
+                    } else {
+                        let nestedTarget = KotlinMemberAccess(base: KotlinSharedExpressionPointer(shared: stableTarget), member: argument.label ?? "associated\(index)")
+                        let nestedPattern = CasePattern(value: argument.value, isVar: expression.isVar)
+                        let nestedSealed = argument.value.inferredType.kotlinIsSealedClassesEnum(codebaseInfo: translator.codebaseInfo)
+                        let (_, nestedBindings, nestedCondition, nestedMessages) = translate(expression: nestedPattern, target: nestedTarget, isSealedClassesEnum: nestedSealed, isStableTarget: true, translator: translator)
+                        bindingVariables += nestedBindings
+                        messages += nestedMessages
+                        if let nestedCondition {
+                            condition = KotlinBinaryOperator(op: .with(symbol: "&&"), lhs: condition, rhs: nestedCondition)
+                        }
                     }
-                    hasBindings = true
-                    let identifierPatterns = binding.identifierPatterns
-                    let variableTypes = binding.variableTypes
-                    updateVariables(for: identifierPatterns, types: variableTypes, member: argument.label ?? "associated\(index)")
                 }
-                if hasBindings {
-                    value = translator.translateExpression(functionCall.function)
-                    if isSealedClassesEnum, let memberAccess = value as? KotlinMemberAccess {
-                        // Change 'is .a' to 'is .acase' to match our sealed class names
-                        memberAccess.member = KotlinEnumCaseDeclaration.sealedClassName(for: memberAccess.member)
-                    }
-                    if hasNonBindings {
-                        messages.append(.kotlinWhenCasePartialBinding(functionCall, source: translator.syntaxTree.source))
-                    }
-                } else {
-                    value = translator.translateExpression(expression.value)
-                }
+                return (targetVariable, bindingVariables, condition, messages)
             } else {
                 value = translator.translateExpression(expression.value)
             }
@@ -650,7 +667,8 @@ final class KotlinClosure: KotlinExpression, KotlinMainActorTargeting {
         // If there is an explicit return type we'll use an anonymous function rather than a closure, as Kotlin
         // closures cannot declare a return type. Kotlin does not support anonymous suspend functions, though
         let kbody = KotlinCodeBlock.translate(statement: expression.body, translator: translator)
-        let isAnonymousFunction = expression.returnType != .none && !expression.isDestructuredParameters && !expression.apiFlags.options.contains(.async) && !expression.apiFlags.options.contains(.mainActor)
+        let effectiveFlags = expression.apiFlags.union(expression.inferredType.apiFlags)
+        let isAnonymousFunction = expression.returnType != .none && !expression.isDestructuredParameters && !effectiveFlags.options.contains(.async) && !effectiveFlags.options.contains(.mainActor)
         var hasReturnLabel = false
         if isAnonymousFunction {
             if expression.returnType != .void {
@@ -697,7 +715,7 @@ final class KotlinClosure: KotlinExpression, KotlinMainActorTargeting {
         kexpression.implicitParameterCount = implicitParameterCount
         kexpression.attributes = expression.attributes
         // Combine inferred flags because most closures aren't declared with explicit info
-        kexpression.apiFlags = expression.apiFlags.union(expression.inferredType.apiFlags)
+        kexpression.apiFlags = effectiveFlags
         kexpression.isAnonymousFunction = isAnonymousFunction
         kexpression.inferredReturnType = expression.returnType != .none ? expression.returnType.resolvingSelf(in: expression) : expression.inferredType.returnType.resolvingSelf(in: expression)
         kexpression.hasReturnLabel = hasReturnLabel
@@ -966,17 +984,33 @@ final class KotlinFunctionCall: KotlinExpression, KotlinMainActorTargeting, APIC
     }
 
     static func translate(expression: FunctionCall, translator: KotlinTranslator) -> KotlinExpression {
+        if let special = KotlinStandardLibraryParity.translateFunctionCall(expression: expression, translator: translator) {
+            return special
+        }
         var karguments = expression.arguments.map {
             let kargumentExpression = translator.translateExpression($0.value)
             return LabeledValue(label: $0.label, value: kargumentExpression)
         }
+        if expression.isSwiftTestingRequirement,
+           expression.arguments.first?.value.inferredType.asTypealiased(nil) == .bool {
+            let result = KotlinFunctionCall(function: KotlinIdentifier(name: "requireTrue"), arguments: karguments)
+            result.inferredType = .void
+            return result
+        }
         // If our first trailing closure is missing a label but subsequent closures have one, add the label to help the Kotlin compiler
         let firstTrailingClosureIndex = karguments.count - expression.trailingClosureCount
-        if expression.trailingClosureCount > 1 && firstTrailingClosureIndex >= 0 && karguments[firstTrailingClosureIndex].label == nil, let apiMatch = expression.apiMatch {
+        if expression.trailingClosureCount > 0 && (expression.trailingClosureCount > 1 || expression.apiMatch?.hasOmittedTrailingParameters == true) && firstTrailingClosureIndex >= 0 && karguments[firstTrailingClosureIndex].label == nil, let apiMatch = expression.apiMatch {
             let parameters = apiMatch.signature.parameters
             if parameters.count == karguments.count {
                 karguments[firstTrailingClosureIndex].label = parameters[firstTrailingClosureIndex].label
             }
+        }
+        // Kotlin Boolean has no public value constructor. Swift's Bool(Bool) is
+        // the identity operation; evaluating its argument once preserves effects.
+        if isFunction(expression: expression, named: "Bool", moduleName: "Swift"),
+           expression.isInit, expression.inferredType == .bool, karguments.count == 1,
+           expression.arguments[0].value.inferredType == .bool {
+            return karguments[0].value
         }
         if let numberLiteral = numberConstructorToLiteral(expression: expression, arguments: karguments) {
             return numberLiteral
@@ -989,6 +1023,23 @@ final class KotlinFunctionCall: KotlinExpression, KotlinMainActorTargeting, APIC
         }
 
         let kfunction = translator.translateExpression(expression.function)
+        if expression.isInit, case .member = expression.inferredType.withoutOptionality().withModuleName(nil) {
+            let sourceType = expression.function.inferredType.isMetaType
+                ? expression.function.inferredType.asMetaType(false) : expression.inferredType
+            let selected = KotlinNestedTypeGenerics.typeArguments(for: sourceType, context: translator.codebaseInfo)
+            let ownCount = sourceType.generics.count
+            let captureCount = selected.count - ownCount
+            if captureCount > 0 {
+                // Preserve explicit source arguments: overload matching can use
+                // their conformance bound (Any/Error), which is not a concrete
+                // constructor specialization. Add only genuinely captured slots.
+                let explicit = (kfunction as? KotlinIdentifier)?.generics ?? (kfunction as? KotlinMemberAccess)?.generics
+                let own = explicit?.count == ownCount ? explicit! : Array(selected.suffix(ownCount))
+                let arguments = (Array(selected.prefix(captureCount)) + own).map { $0.resolvingSelf(in: expression) }
+                if let identifier = kfunction as? KotlinIdentifier { identifier.generics = arguments }
+                if let member = kfunction as? KotlinMemberAccess { member.generics = arguments }
+            }
+        }
         // E.g. [Int](), [String: Int]()
         if var usableAsTypeLiteral = kfunction as? KotlinUsableAsTypeLiteral {
             usableAsTypeLiteral.isUsedAsTypeLiteral = true
@@ -1023,9 +1074,18 @@ final class KotlinFunctionCall: KotlinExpression, KotlinMainActorTargeting, APIC
     }
 
     private static func numberConstructorToLiteral(expression: FunctionCall, arguments: [LabeledValue<KotlinExpression>]) -> KotlinExpression? {
-        guard arguments.count == 1, arguments[0].label == nil, let numberLiteral = arguments[0].value as? KotlinNumericLiteral else {
-            return nil
+        guard arguments.count == 1, arguments[0].label == nil else { return nil }
+        // A negative literal is a prefix expression in Swift's syntax tree.
+        // Keep that expression (including negative zero), applying Kotlin's
+        // Float suffix to its literal rather than calling Float's private ctor.
+        if isFunction(expression: expression, named: "Float", moduleName: "Swift"),
+           let prefix = arguments[0].value as? KotlinPrefixOperator,
+           prefix.operatorSymbol == "-" || prefix.operatorSymbol == "+",
+           let literal = prefix.target as? KotlinNumericLiteral {
+            literal.suffix = "f"
+            return prefix
         }
+        guard let numberLiteral = arguments[0].value as? KotlinNumericLiteral else { return nil }
         // Kotlin supports suffixes to create literals of certain numeric types, which are more efficient than function calls:
         // f, L, U, UL
         if isFunction(expression: expression, named: "Float", moduleName: "Swift") {
@@ -1769,12 +1829,20 @@ final class KotlinKeyPathLiteral: KotlinExpression {
     var components: [KeyPathLiteral.Component] = []
     var isWrite = false
     var keyPathType: TypeSignature = .none
+    var convertedRead: KotlinExpression?
 
     static func translate(expression: KeyPathLiteral, translator: KotlinTranslator) -> KotlinKeyPathLiteral {
         let kexpression = KotlinKeyPathLiteral(expression: expression)
         kexpression.root = expression.root
         kexpression.components = expression.components
         kexpression.keyPathType = expression.inferredType
+        let expected = KotlinStandardLibraryParity.contextualExpectedType(of: expression)
+        if !expression.inferredType.isKeyPath && expected.isFunction {
+            let read = KotlinRawExpression(sourceCode: kexpression.pathString(root: "it"))
+            let converted = KotlinStandardLibraryParity.coerce(read, expression: expression, to: expected.returnType,
+                                                              sourceType: expression.inferredType.returnType)
+            if converted !== read { kexpression.convertedRead = converted }
+        }
         return kexpression
     }
 
@@ -1785,6 +1853,8 @@ final class KotlinKeyPathLiteral: KotlinExpression {
     private init(expression: KeyPathLiteral) {
         super.init(type: .keyPathLiteral, expression: expression)
     }
+
+    override var children: [KotlinSyntaxNode] { convertedRead.map { [$0] } ?? [] }
 
     /// The key path code, traversing from the given root.
     func pathString(root: String) -> String {
@@ -1813,7 +1883,11 @@ final class KotlinKeyPathLiteral: KotlinExpression {
         if isWrite {
             output.append("it, it_1 -> ")
         }
-        output.append(pathString(root: "it"))
+        if !isWrite, let convertedRead {
+            output.append(convertedRead, indentation: indentation)
+        } else {
+            output.append(pathString(root: "it"))
+        }
         if isWrite {
             output.append(" = it_1")
         }
@@ -1917,7 +1991,25 @@ final class KotlinMemberAccess: KotlinExpression, KotlinMainActorTargeting, Kotl
 
         // Kotlin member access never includes generics on the owning type unless we're referencing a function
         if !kexpression.isFunctionReference {
-            kexpression.baseType = kexpression.baseType.withGenerics([])
+            kexpression.baseType = KotlinNestedTypeGenerics.erasedQualifier(kexpression.baseType)
+            if let baseMember = kexpression.base as? KotlinMemberAccess, let sourceBase = expression.base, sourceBase.inferredType.isMetaType {
+                // A static nested type used as a qualifier has no Kotlin type
+                // arguments. Constructor calls assign their selected arguments
+                // after this translation; an enclosing qualifier never does.
+                func eraseQualifierArguments(_ node: KotlinExpression, source: Expression) {
+                    guard source.inferredType.isMetaType else { return }
+                    if let identifier = node as? KotlinIdentifier {
+                        identifier.generics = []
+                    } else if let member = node as? KotlinMemberAccess, let sourceMember = source as? MemberAccess {
+                        member.generics = []
+                        member.baseType = KotlinNestedTypeGenerics.erasedQualifier(member.baseType)
+                        if let base = member.base, let sourceBase = sourceMember.base {
+                            eraseQualifierArguments(base, source: sourceBase)
+                        }
+                    }
+                }
+                eraseQualifierArguments(baseMember, source: sourceBase)
+            }
             if let baseIdentifier = kexpression.base as? KotlinIdentifier {
                 if kexpression.member == "self" {
                     kexpression.classReferenceGenerics = baseIdentifier.generics?.map {
@@ -2282,6 +2374,20 @@ final class KotlinNumericLiteral: KotlinExpression {
         self.literal = expression.literal
         self.isFloatingPoint = expression.isFloatingPoint
         self.isAssignedToFloatingPoint = expression.isAssignedToFloatingPoint
+        switch expression.inferredType.asTypealiased(nil).withModuleName(nil) {
+        case .float: suffix = "f"
+        case .uint64: suffix = "UL"
+        default: break
+        }
+        if !expression.isFloatingPoint, let operation = expression.parent as? BinaryOperator,
+           [.addition, .multiplication, .comparison].contains(operation.op.precedence) {
+            let peer = operation.lhs === expression ? operation.rhs : operation.lhs
+            switch peer.inferredType.asTypealiased(nil).withModuleName(nil) {
+            case .uint: suffix = "U"
+            case .uint64: suffix = "UL"
+            default: break
+            }
+        }
         super.init(type: .numericLiteral, expression: expression)
     }
 
@@ -2620,6 +2726,7 @@ final class KotlinStringLiteral: KotlinExpression {
     var isCharacter = false
     var expressibleByStringLiteralType: TypeSignature?
     var expressibleByStringInterpolationType: (TypeSignature, TypeSignature)?
+    var expressibleByExtendedGraphemeClusterLiteralType: (TypeSignature, TypeSignature)?
 
     static func translate(expression: StringLiteral, translator: KotlinTranslator) -> KotlinStringLiteral {
         let kexpression = KotlinStringLiteral(expression: expression)
@@ -2648,13 +2755,17 @@ final class KotlinStringLiteral: KotlinExpression {
         kexpression.isCharacter = expression.inferredType == .character
         kexpression.expressibleByStringLiteralType = expression.expressibleByStringLiteralType
         kexpression.expressibleByStringInterpolationType = expression.expressibleByStringInterpolationType
+        kexpression.expressibleByExtendedGraphemeClusterLiteralType = expression.expressibleByExtendedGraphemeClusterLiteralType
+        if let (_, argumentType) = expression.expressibleByExtendedGraphemeClusterLiteralType,
+           argumentType.isSameType(as: .character, withoutOptionality: true) {
+            kexpression.isCharacter = true
+        }
         return kexpression
     }
 
     private static func translateStringSegment(_ string: String, isMultiline: Bool = false) -> String {
         var kstring = ""
         var backslashCount = 0
-        var skipNextClosingBraceCount = 0
         var index = string.startIndex
         while index != string.endIndex {
             let c = string[index]
@@ -2666,16 +2777,34 @@ final class KotlinStringLiteral: KotlinExpression {
                 } else {
                     kstring.append(c)
                 }
+            case "0":
+                // Swift's null escape is not a Kotlin escape sequence.
+                if !isMultiline && backslashCount % 2 == 1 {
+                    kstring.append("u0000") // Leading backslash already appended
+                } else {
+                    kstring.append(c)
+                }
             case "u":
-                // Swift uses \u{####} for Unicode while Kotlin uses \u####
+                // Swift escapes contain Unicode scalar values; Kotlin escapes encode
+                // exactly one UTF-16 code unit. Preserve literal escaped backslashes.
                 if backslashCount % 2 == 1 {
                     let nextIndex = string.index(after: index)
-                    if nextIndex != string.endIndex && string[nextIndex] == "{" {
-                        index = nextIndex // Will skip opening brace
-                        skipNextClosingBraceCount += 1
+                    if nextIndex != string.endIndex && string[nextIndex] == "{",
+                       let closing = string[nextIndex...].firstIndex(of: "}"),
+                       let value = UInt32(string[string.index(after: nextIndex)..<closing], radix: 16),
+                       let scalar = Unicode.Scalar(value) {
+                        let units = String(scalar).utf16.map { unit -> String in
+                            let digits = String(unit, radix: 16, uppercase: true)
+                            return "u" + String(repeating: "0", count: 4 - digits.count) + digits
+                        }
+                        kstring += units.joined(separator: "\\")
+                        index = closing
+                    } else {
+                        kstring.append(c)
                     }
+                } else {
+                    kstring.append(c)
                 }
-                kstring.append(c)
             case "$":
                 // Kotlin's backslash escape for `$` does not work inside
                 // triple-quoted (multiline) strings, so use the `${"$"}`
@@ -2685,12 +2814,6 @@ final class KotlinStringLiteral: KotlinExpression {
                 } else {
                     kstring.append("\\")
                     kstring.append("$")
-                }
-            case "}":
-                if skipNextClosingBraceCount > 0 {
-                    skipNextClosingBraceCount -= 1
-                } else {
-                    kstring.append(c)
                 }
             default:
                 kstring.append(c)
@@ -2731,9 +2854,17 @@ final class KotlinStringLiteral: KotlinExpression {
             appendExpressibleByStringInterpolation(expressibleByStringInterpolationType, to: output, indentation: indentation)
         } else if let expressibleByStringLiteralType {
             appendExpressibleByStringLiteral(expressibleByStringLiteralType, to: output, indentation: indentation)
+        } else if let (type, _) = expressibleByExtendedGraphemeClusterLiteralType {
+            output.append(type.kotlin).append("(extendedGraphemeClusterLiteral = ")
+            appendInlineInterpolation(to: output, indentation: indentation)
+            output.append(")")
         } else {
             appendInlineInterpolation(to: output, indentation: indentation)
         }
+    }
+
+    override func insertDependencies(into dependencies: inout KotlinDependencies) {
+        expressibleByExtendedGraphemeClusterLiteralType?.0.insertDependencies(into: &dependencies)
     }
 
     private func appendInlineInterpolation(to output: OutputGenerator, indentation: Indentation) {
@@ -3083,7 +3214,13 @@ final class KotlinWhen: KotlinExpression {
         var kon = translator.translateExpression(expression.on)
         let isSealedClassesEnum = expression.on.inferredType.kotlinIsSealedClassesEnum(codebaseInfo: translator.codebaseInfo)
         var caseTargetVariable: KotlinTargetVariable? = nil
-        let hasNonNilMatches = expression.cases.contains { $0.patterns.contains { $0.pattern.isNonNilMatch } }
+        let hasNonNilMatches = expression.cases.contains { switchCase in
+            switchCase.patterns.contains { pattern in
+                if pattern.pattern.isNonNilMatch || pattern.whereGuard != nil { return true }
+                guard isSealedClassesEnum, let call = pattern.pattern.value as? FunctionCall else { return false }
+                return call.arguments.contains { !($0.value is Binding) }
+            }
+        }
         // When we have to compare the switch expression to nil we'll be executing it repeatedly, so store it in a var
         if hasNonNilMatches && (kon as? KotlinIdentifier)?.isLocalOrSelfIdentifier != true {
             caseTargetVariable = KotlinTargetVariable(value: kon)
@@ -3109,6 +3246,12 @@ final class KotlinWhen: KotlinExpression {
             }
             kcases.append(kcase)
             messages += caseMessages
+        }
+        // Compound pattern guards require a subjectless when. Kotlin cannot
+        // prove its exhaustiveness, even when Swift has checked every enum case.
+        if hasNonNilMatches && kcases.allSatisfy({ !$0.patterns.isEmpty }) {
+            let unreachable = KotlinCodeBlock(statements: [KotlinRawStatement(sourceCode: "throw NoWhenBranchMatchedException()")])
+            kcases.append(KotlinCase(patterns: [], body: unreachable))
         }
         // If we've created a var to match against, change the switch to use the var
         if let caseTargetVariable {

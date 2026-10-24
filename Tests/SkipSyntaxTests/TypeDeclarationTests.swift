@@ -40,25 +40,25 @@ final class TypeDeclarationTests: XCTestCase {
     }
 
     func testNestedGenericClassForced() async throws {
+        // Only captured parameters are lifted: B references T in its method,
+        // while its empty nested C carries only its own native-valid V.
         try await check(swift: """
         class A<T> {
-            // SKIP NOWARN
-            class B<T> {
-                // SKIP NOWARN
-                class C<T> {
+            class B<U> {
+                class C<V> {
                 }
 
-                func f(b: B.C<T>) {
+                func f(b: A<T>.B<U>.C<Int>) {
                 }
             }
         }
         """, kotlin: """
         internal open class A<T> {
-            internal open class B<T> {
-                internal open class C<T> {
+            internal open class B<T, U> {
+                internal open class C<V> {
                 }
 
-                internal open fun f(b: A.B.C<T>) = Unit
+                internal open fun f(b: A.B.C<Int>) = Unit
             }
         }
         """)
@@ -374,7 +374,7 @@ final class TypeDeclarationTests: XCTestCase {
         }
         """)
 
-        try await checkProducesMessage(swift: """
+        try await check(swift: """
         class Dict<K, V> {
             var entries: [Entry] = []
 
@@ -384,6 +384,25 @@ final class TypeDeclarationTests: XCTestCase {
                 init(key: K, value: V) {
                     self.key = key
                     self.value = value
+                }
+            }
+        }
+        """, kotlin: """
+        import skip.lib.Array
+
+        internal open class Dict<K, V> {
+            internal open var entries: Array<Dict.Entry<K, V>> = arrayOf()
+                get() = field.sref({ this.entries = it })
+                set(newValue) {
+                    field = newValue.sref()
+                }
+
+            internal open class Entry<K, V> {
+                internal val key: K
+                internal val value: V
+                internal constructor(key: K, value: V) {
+                    this.key = key.sref()
+                    this.value = value.sref()
                 }
             }
         }
@@ -861,12 +880,20 @@ final class TypeDeclarationTests: XCTestCase {
     }
 
     func testLocalTypes() async throws {
-        try await checkProducesMessage(swift: """
+        try await check(swift: """
         func f() -> Int {
             class F {
                 static let x = 1
             }
             return F.x + 1
+        }
+        """, kotlin: """
+        internal fun f(): Int = Local_Source_swift_2_5_F.x + 1
+        private open class Local_Source_swift_2_5_F {
+
+            companion object {
+                internal val x = 1
+            }
         }
         """)
     }

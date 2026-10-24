@@ -23,7 +23,7 @@ public final class SyntaxTree: PrettyPrintable {
         self.root.statements = StatementDecoder.decode(syntaxListContainer: syntax, context: DecodeContext(), in: self)
 
         let importedModuleNames = root.statements.importedModulePaths.compactMap(\.moduleName)
-        let codebaseContext = codebaseInfo?.context(importedModuleNames: importedModuleNames, sourceFile: source.file)
+        let codebaseContext = codebaseInfo?.context(importedModuleNames: importedModuleNames, testableImportedModuleNames: root.statements.testableImportedModulePaths.compactMap(\.moduleName), sourceFile: source.file)
         let typeResolutionContext = TypeResolutionContext(codebaseInfo: codebaseContext)
         root.resolveSubtreeAttributes(in: self, context: typeResolutionContext)
 

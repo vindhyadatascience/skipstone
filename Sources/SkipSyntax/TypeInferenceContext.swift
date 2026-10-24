@@ -166,6 +166,12 @@ struct TypeInferenceContext {
         return addingIdentifier(function.name, type: function.functionType, attributes: function.attributes)
     }
 
+    /// Preserve the declared local type before generic conformance constraints
+    /// replace it with an existential during ordinary inference.
+    func unconstrainedLocalIdentifierType(_ name: String) -> TypeSignature? {
+        localIdentifierTypes[name]?.type
+    }
+
     /// Return the type of the given identifier.
     func identifier(_ name: String, messagesNode: SyntaxNode?) -> (TypeSignature, APIMatch)? {
         var name = name
@@ -368,13 +374,13 @@ struct TypeInferenceContext {
         }
 
         // Not a known member function. Check functions that can be invoked without a target type
-        if var (localFunction, _, _) = localIdentifierTypes[name], case .function(_, _, _, let attributes) = localFunction {
+        if var (localFunction, _, _) = localIdentifierTypes[name], case .function = localFunction {
             if let codebaseInfo {
                 if let localType = path.last?.typeSignature?.asMetaType(path.last?.isStatic == true).constrainedTypeWithGenerics(generics) {
                     localFunction = localFunction.resolvingSelf(in: nil, to: localType)
                 }
-                if let callSignature = codebaseInfo.callableSignature(of: localFunction, generics: generics, arguments: constrainedArguments) {
-                    return [APIMatch(signature: callSignature, apiFlags: localFunction.apiFlags, declarationType: .functionDeclaration, attributes: attributes)]
+                if let match = codebaseInfo.callableMatch(of: localFunction, generics: generics, arguments: constrainedArguments) {
+                    return [match]
                 }
             } else {
                 return []
@@ -487,8 +493,39 @@ struct TypeInferenceContext {
             }
         case .stringLiteral:
             if type.isNamedType, let stringLiteral = expression as? StringLiteral {
+                // A protocol formal accepts the literal's concrete String value.
+                // Compatibility does not make that protocol a constructible literal type.
+                let literalTarget = type.withoutOptionality().asTypealiased(nil).withExistentialMode(.none)
+                if codebaseInfo?.primaryTypeInfo(forNamed: literalTarget)?.declarationType == .protocolDeclaration {
+                    stringLiteral.expressibleByStringLiteralType = nil
+                    stringLiteral.expressibleByStringInterpolationType = nil
+                    stringLiteral.expressibleByExtendedGraphemeClusterLiteralType = nil
+                    return
+                }
                 if stringLiteral.isInterpolated, let interpolationType = interpolationType(for: type) {
                     stringLiteral.expressibleByStringInterpolationType = (type, interpolationType)
+                } else if let codebaseInfo,
+                          type.compatibilityScore(target: .named("ExpressibleByStringLiteral", []), codebaseInfo: codebaseInfo) == nil,
+                          let graphemeType = graphemeLiteralType(for: type) {
+                    guard !stringLiteral.isInterpolated else {
+                        stringLiteral.messages.append(Message(kind: .error,
+                            message: "String interpolation cannot initialize an ExpressibleByExtendedGraphemeClusterLiteral-only type.",
+                            sourceFile: expression.sourceFile, sourceRange: expression.sourceRange))
+                        return
+                    }
+                    guard let value = stringLiteral.representedLiteralValue, value.count == 1 else {
+                        stringLiteral.messages.append(Message(kind: .error,
+                            message: "An extended grapheme cluster literal must contain exactly one Character.",
+                            sourceFile: expression.sourceFile, sourceRange: expression.sourceRange))
+                        return
+                    }
+                    if graphemeType.isSameType(as: .character, withoutOptionality: true), value.utf16.count != 1 {
+                        stringLiteral.messages.append(Message(kind: .error,
+                            message: "Skip cannot represent this Character-backed grapheme literal with a single Kotlin Char.",
+                            sourceFile: expression.sourceFile, sourceRange: expression.sourceRange))
+                        return
+                    }
+                    stringLiteral.expressibleByExtendedGraphemeClusterLiteralType = (type, graphemeType)
                 } else {
                     stringLiteral.expressibleByStringLiteralType = type
                 }
@@ -515,6 +552,14 @@ struct TypeInferenceContext {
             return nil
         }
         return match.first?.signature.parameters.first?.type
+    }
+
+    private func graphemeLiteralType(for expressible: TypeSignature) -> TypeSignature? {
+        guard let codebaseInfo,
+              expressible.compatibilityScore(target: .named("ExpressibleByExtendedGraphemeClusterLiteral", []), codebaseInfo: codebaseInfo) != nil else { return nil }
+        return codebaseInfo.matchFunction(name: nil, inConstrained: expressible,
+            arguments: [LabeledValue(label: "extendedGraphemeClusterLiteral", value: ArgumentValue(type: .none))])
+            .first?.signature.parameters.first?.type
     }
 
     /// Determine the element type of the given type, correctly handling custom sequences.
@@ -639,10 +684,20 @@ struct TypeInferenceContext {
 
     private func argumentValue(for expression: Expression, isFirstTrailingClosure: Bool = false) -> ArgumentValue {
         let inferredType = expression.inferredType
+        var unwrapped = expression
+        while let parenthesized = unwrapped as? Parenthesized { unwrapped = parenthesized.content }
+        if unwrapped is ArrayLiteral {
+            return ArgumentValue(type: inferredType, isFirstTrailingClosure: isFirstTrailingClosure, isArrayLiteral: true)
+        }
+        if unwrapped is NumericLiteral {
+            return ArgumentValue(type: inferredType, isFirstTrailingClosure: isFirstTrailingClosure, isNumericLiteral: true)
+        }
         // TODO: Handle other Expressible types
         switch expression.type {
         case .stringLiteral:
-            return ArgumentValue(type: inferredType, isLiteral: true, isInterpolated: (expression as! StringLiteral).isInterpolated)
+            let literal = expression as! StringLiteral
+            return ArgumentValue(type: inferredType, isLiteral: true, isInterpolated: literal.isInterpolated,
+                isSingleGraphemeLiteral: !literal.isInterpolated && literal.representedLiteralValue?.count == 1)
         default:
             return ArgumentValue(type: inferredType, isFirstTrailingClosure: isFirstTrailingClosure)
         }

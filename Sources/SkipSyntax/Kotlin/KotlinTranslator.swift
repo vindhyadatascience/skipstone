@@ -69,15 +69,17 @@ public final class KotlinTranslator {
     /// Translate and transpile to source code.
     public func transpile(codebaseInfo: CodebaseInfo, transformers: [KotlinTransformer], startTime: TimeInterval) -> [Transpilation] {
         let importedModuleNames = syntaxTree.root.statements.importedModulePaths.compactMap(\.moduleName)
-        let codebaseInfoContext = codebaseInfo.context(importedModuleNames: importedModuleNames, sourceFile: syntaxTree.source.file)
+        let codebaseInfoContext = codebaseInfo.context(importedModuleNames: importedModuleNames, testableImportedModuleNames: syntaxTree.root.statements.testableImportedModulePaths.compactMap(\.moduleName), sourceFile: syntaxTree.source.file)
         self.codebaseInfo = codebaseInfoContext
         self.packageName = codebaseInfo.kotlin?.packageName
 
-        let kotlinSyntaxTree = translateSyntaxTree()
-        let outputs = transformers.flatMap { $0.apply(to: kotlinSyntaxTree, translator: self) }
-        addPackageAndRequiredImportStatements(to: kotlinSyntaxTree)
+        return KotlinNestedTypeGenerics.$current.withValue(KotlinNestedTypeRenderingScope(context: codebaseInfoContext)) {
+            let kotlinSyntaxTree = translateSyntaxTree()
+            let outputs = transformers.flatMap { $0.apply(to: kotlinSyntaxTree, translator: self) }
+            addPackageAndRequiredImportStatements(to: kotlinSyntaxTree)
 
-        return transpilations(for: kotlinSyntaxTree, codebaseInfo: codebaseInfo, transformers: transformers, input: kotlinSyntaxTree.source, outputs: outputs, startTime: startTime)
+            return transpilations(for: kotlinSyntaxTree, codebaseInfo: codebaseInfo, transformers: transformers, input: kotlinSyntaxTree.source, outputs: outputs, startTime: startTime)
+        }
     }
 
     /// Transpile the package support file containing any needed package-level code.
@@ -90,20 +92,38 @@ public final class KotlinTranslator {
         translator.codebaseInfo = codebaseInfoContext
         translator.packageName = codebaseInfo.kotlin?.packageName
 
-        let kotlinSyntaxTree = translator.translateSyntaxTree()
-        let outputs = transformers.flatMap { $0.apply(toPackage: kotlinSyntaxTree, translator: translator) }
-        let packageSyntaxTree: KotlinSyntaxTree? = kotlinSyntaxTree.root.statements.isEmpty ? nil : kotlinSyntaxTree
-        if let packageSyntaxTree {
-            translator.addPackageAndRequiredImportStatements(to: packageSyntaxTree)
-        }
+        return KotlinNestedTypeGenerics.$current.withValue(KotlinNestedTypeRenderingScope(context: codebaseInfoContext)) {
+            let kotlinSyntaxTree = translator.translateSyntaxTree()
+            let outputs = transformers.flatMap { $0.apply(toPackage: kotlinSyntaxTree, translator: translator) }
+            let packageSyntaxTree: KotlinSyntaxTree? = kotlinSyntaxTree.root.statements.isEmpty ? nil : kotlinSyntaxTree
+            if let packageSyntaxTree {
+                translator.addPackageAndRequiredImportStatements(to: packageSyntaxTree)
+            }
 
-        let transpilations = translator.transpilations(for: packageSyntaxTree, codebaseInfo: codebaseInfo, transformers: transformers, input: source, outputs: outputs, startTime: startTime)
-        return transpilations
+            let transpilations = translator.transpilations(for: packageSyntaxTree, codebaseInfo: codebaseInfo, transformers: transformers, input: source, outputs: outputs, startTime: startTime)
+            return transpilations
+        }
     }
 
     /// Translate syntax trees only.
     public func translateSyntaxTree() -> KotlinSyntaxTree {
         let kotlinRoot = KotlinCodeBlock.translate(statement: syntaxTree.root, translator: self)
+        var localTypes: [KotlinStatement] = []
+        kotlinRoot.visit { _ in
+            return .recurse { node in
+            if let block = node as? KotlinCodeBlock {
+                block.statements = block.statements.filter { statement in
+                    if let declaration = statement as? KotlinClassDeclaration, declaration.isLocalType {
+                        declaration.modifiers.visibility = .private
+                        localTypes.append(declaration)
+                        return false
+                    }
+                    return true
+                }
+            }
+            }
+        }
+        kotlinRoot.statements += localTypes
         kotlinRoot.statements = moveImportsToTop(statements: kotlinRoot.statements)
         let dependencies = gatherDependencies(from: kotlinRoot.statements)
         kotlinRoot.messages = syntaxTree.root.messages
@@ -198,6 +218,11 @@ public final class KotlinTranslator {
     }
 
     func translateExpression(_ expression: Expression) -> KotlinExpression {
+        let value = translateExpressionWithoutContextualCoercion(expression)
+        return KotlinStandardLibraryParity.coerce(value, expression: expression, to: KotlinStandardLibraryParity.contextualExpectedType(of: expression))
+    }
+
+    private func translateExpressionWithoutContextualCoercion(_ expression: Expression) -> KotlinExpression {
         do {
             switch expression.type {
             case .arrayLiteral:

@@ -57,8 +57,8 @@ timestamps. What we check instead is that the transpiled output is identical (ne
 section). Whoever publishes a binary records its SHA-256 in the consumer's
 `binaryTarget` checksum, and every machine then downloads that one file.
 
-Linux (`scripts/build_linux_plugin.sh`) needs swiftly plus the static Linux SDK and
-has not been built for VDS yet.
+The historical releases above contained only macOS artifacts. Linux releases use
+`scripts/build_linux_plugin.sh`, a matching Swift toolchain, and the static Linux SDK.
 
 ## Check a build against stock Skip
 
@@ -118,3 +118,39 @@ built source SHA and archive checksum separately from prebuilt recheck output.
 Before publication, exercise the same archive through a local wrapper binary target.
 Publish those verified bytes, then update the wrapper revision, CLI, CI and tap
 checksums together. Runtime/package verification evidence accompanies the release.
+
+
+## 1.9.19-vds.2 compiler repairs
+
+This release intentionally changes Kotlin output. It retains the 1.9.19 upstream
+base and pinned Skip submodule, and adds tested Swift language and interoperability
+repairs: explicit closure signatures, contextual literals and type erasure,
+constructor metadata and access, nested generic captures, property-wrapper
+memberwise initialization, and explicit testing metadata with Kotlin friendship.
+
+Stored collection mutation and scalar-read accessors are advertised by separate
+producer metadata capabilities. Old producers keep the copying path. The scalar
+read path returns only `count` or `isEmpty`; ordinary copies, observers, escaped
+values and unsupported receivers preserve their existing value semantics.
+Immutable View body evaluation likewise requires the matching public SDK
+capability and proven immutable inputs. Unknown or mutable inputs retain the
+existing evaluation path.
+
+Validate changed behavior with the native compiler tests, actual generated Kotlin
+compiled and executed against the matching runtime, and compiled defect controls
+that restore the exact source and rerun the positive. Do not normalize generated
+Kotlin to make an old/new comparison pass. The historical identical-output checks
+above describe their original unpatched producers only.
+
+For macOS, use the build command above with `SKIP_VERSION=1.9.19-vds.2`. For Linux,
+use Swift 6.4.0 with its matching static Linux SDK; build and exercise both
+`aarch64` and `x86_64` variants. `.github/workflows/vds-linux-build.yml` records the
+native build/test procedure without publishing a release. The packaging verifier
+`scripts/vds_linux_artifact.py` rejects mismatched source, version, architecture,
+submodules, locks and receipts before combining native artifacts. Cross-built
+artifacts must be labeled as cross-built and executed with their recorded runner;
+they must not be represented as a native test run on that architecture.
+
+Publish source and exact archive checksums together, then update the SwiftPM
+wrapper, CLI, CI and tap pins as one graph. Recheck that graph without local
+package edits or a compiler override before application integration.

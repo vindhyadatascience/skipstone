@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import SwiftSyntax
+import SwiftParser
 
 /// Supported Swift expression types.
 enum ExpressionType: CaseIterable {
@@ -120,6 +121,7 @@ enum ExpressionType: CaseIterable {
 final class ArrayLiteral: Expression {
     let elements: [Expression]
     let useMultilineFormatting: Bool
+    private(set) var contextualType: TypeSignature = .none
 
     init(elements: [Expression], useMultilineFormatting: Bool, syntax: SyntaxProtocol?, sourceFile: Source.FilePath?, sourceRange: Source.Range? = nil) {
         self.elements = elements
@@ -146,9 +148,13 @@ final class ArrayLiteral: Expression {
     }
 
     override func inferTypes(context: TypeInferenceContext, expecting: TypeSignature) -> TypeInferenceContext {
+        contextualType = expecting
         var elementType = collectionType.elementType
-        if expecting.elementType != .none {
-            elementType = expecting.elementType
+        // Sequence<Element> is a named/existential protocol, so its element
+        // comes from the iterator contract rather than the builtin shape alone.
+        let expectedElementType = expecting == .none ? .none : context.elementType(of: expecting)
+        if expectedElementType != .none {
+            elementType = expectedElementType
             elements.forEach { $0.inferTypes(context: context, expecting: elementType) }
         } else {
             if expecting.isNamedType {
@@ -336,7 +342,16 @@ final class BinaryOperator: Expression {
             let type = (rhs as? TypeLiteral)?.literal ?? expecting
             lhs.inferTypes(context: context, expecting: type)
             rhs.inferTypes(context: context, expecting: .none)
-            resultType = op.symbol == "is" ? .bool : type
+            if op.symbol == "is" {
+                resultType = .bool
+            } else if op.symbol == "as?" {
+                // A conditional cast adds an Optional layer, including when
+                // its target is already Optional. Keep this source presence
+                // so contextual erasure can distinguish failure from a value.
+                resultType = .optional(type)
+            } else {
+                resultType = type
+            }
         case .range:
             lhs.inferTypes(context: context, expecting: expecting.elementType)
             rhs.inferTypes(context: context, expecting: lhs.inferredType)
@@ -733,6 +748,7 @@ final class FunctionCall: Expression, APICallExpression, MemberAccessExpression 
     let function: Expression
     let arguments: [LabeledValue<Expression>]
     let trailingClosureCount: Int
+    var isSwiftTestingRequirement = false
     private(set) var isInit = false
     /// Whether this is a call on the `Optional` type, e.g. `Optional<T>.map`.
     private(set) var isCallOnOptional = false
@@ -832,9 +848,57 @@ final class FunctionCall: Expression, APICallExpression, MemberAccessExpression 
             return context
         }
 
-        // First we infer argument types without knowing the function, so we expect .none
-        arguments.forEach { $0.value.inferTypes(context: context.withMessagesSuppressed(true), expecting: .none) }
+        // A concrete, explicitly specialized builtin collection can provide its
+        // literal element context before overload matching. A provisional
+        // Array<Double> must not reject Set<Float>'s sequence initializer first.
+        var collectionLiteralExpectation = TypeSignature.none
+        let explicitGenerics = (function as? Identifier)?.generics ?? (function as? MemberAccess)?.generics
+        let constructorType = function.inferredType.asTypealiased(nil).asMetaType(false).withModuleName(nil)
+        if function.inferredType.isMetaType, explicitGenerics?.count == 1,
+           arguments.count == 1, arguments[0].label == nil {
+            let element: TypeSignature?
+            switch constructorType {
+            case .array(let value), .set(let value): element = value
+            default: element = nil
+            }
+            if var element {
+                // Resolve exact same-type constraints, never conformance bounds.
+                for _ in 0...context.generics.entries.count {
+                    let mapped = element.mappingTypes { type in
+                        let equal = context.generics.constrainedType(of: type, ifEqual: true)
+                        return equal == .none || equal == type ? nil : equal
+                    }
+                    if mapped == element { break }
+                    element = mapped
+                }
+                var concrete = element.isFullySpecified
+                element.visit { type in
+                    if type == .any || type == .none || context.generics.entries.contains(where: { type == $0.namedType }) {
+                        concrete = false
+                        return .skip
+                    }
+                    return .recurse(nil)
+                }
+                if concrete { collectionLiteralExpectation = .array(element) }
+            }
+        }
+        arguments.forEach { argument in
+            var value = argument.value
+            while let parenthesized = value as? Parenthesized { value = parenthesized.content }
+            let literalExpectation = value is ArrayLiteral ? collectionLiteralExpectation : .none
+            argument.value.inferTypes(context: context.withMessagesSuppressed(true), expecting: literalExpectation)
+        }
         let argumentTypes = arguments.map { $0.value.inferredType }
+        let qualifiedBoolean = (function as? MemberAccess).map {
+            $0.member == "Bool" && ($0.base as? Identifier)?.name == "Swift"
+        } == true
+        if (baseType == .bool && name == nil || qualifiedBoolean), arguments.count == 1,
+           arguments[0].label == nil, argumentTypes[0] == .bool {
+            isInit = true
+            returnType = .bool
+            apiMatch = APIMatch(signature: .function([.init(type: .bool)], .bool, APIFlags(), nil), declarationType: .initDeclaration, memberOf: (.bool, nil))
+            return context
+        }
         let match: (TypeSignature, APIMatch)?
         let matchBaseType: TypeSignature?
         if isUnchainedOptional, let name, let baseType, baseType.withModuleName(nil) != .none, let optionalMatch = context.function(name, in: .named("Optional", [baseType]), arguments: arguments, trailingClosureCount: trailingClosureCount, expectedReturn: expecting, messagesNode: nil) {
@@ -938,7 +1002,8 @@ final class FunctionCall: Expression, APICallExpression, MemberAccessExpression 
 
 /// `x`, also `self` or `super`
 final class Identifier: Expression, APICallExpression {
-    let name: String
+    private(set) var unconstrainedLocalType: TypeSignature = .none
+    private(set) var name: String
     private(set) var generics: [TypeSignature]?
     /// Whether this appears to be a local variable or parameter.
     private(set) var isLocalOrSelfIdentifier: Bool
@@ -975,10 +1040,12 @@ final class Identifier: Expression, APICallExpression {
     }
 
     override func resolveAttributes(in syntaxTree: SyntaxTree, context: TypeResolutionContext) {
+        if let declaration = localType(named: name) { name = declaration.signature.name }
         generics = generics?.map { $0.resolved(in: self, context: context) }
     }
 
     override func inferTypes(context: TypeInferenceContext, expecting: TypeSignature) -> TypeInferenceContext {
+        unconstrainedLocalType = context.unconstrainedLocalIdentifierType(name) ?? .none
         // Don't output availability messages here if this is part of a function call. There could be other
         // identifier matches. The function call node will have more type information
         if let (signature, match) = context.identifier(name, messagesNode: isCalledAsFunction ? nil : self) {
@@ -1181,7 +1248,7 @@ final class KeyPathLiteral: Expression {
                 root = root.or(expecting.generics[0])
                 expectingLeaf = expecting.generics[1]
             }
-        } else if case .function(let parameters, let returnType, _, _) = expecting {
+        } else if case .function(let parameters, let returnType, _, _) = expecting.asTypealiased(nil).withoutOptionality() {
             if parameters.count == 1 {
                 root = root.or(parameters[0].type)
             }
@@ -1302,64 +1369,34 @@ final class MacroExpansion: Expression {
 
         let expression = firstArg.expression
 
-        // Check for comparison operators: ==, !=, >, <, >=, <=
-        // These appear as SequenceExprSyntax in SwiftSyntax. The comparison operator
-        // has the lowest precedence, so we find the last comparison operator in the
-        // sequence and split the expression on it.
-        if let sequenceExpr = expression.as(SequenceExprSyntax.self) {
-            let elements = Array(sequenceExpr.elements)
-            // Find the last comparison operator (lowest precedence in Swift)
-            let comparisonOps: Set<String> = ["==", "!=", ">", "<", ">=", "<="]
-            if let opIndex = elements.lastIndex(where: { elem in
-                if let op = elem.as(BinaryOperatorExprSyntax.self) {
-                    return comparisonOps.contains(op.operator.text)
+        // Decode precedence first: && and || bind more loosely than comparisons.
+        // Splitting a flat SwiftSyntax sequence on its last comparison changes
+        // `a >= 0 && a < 2` into the invalid `(a >= 0 && a) < 2`.
+        let condition = ExpressionDecoder.decode(syntax: expression, in: syntaxTree)
+        if let comparison = condition as? BinaryOperator {
+            let suffix: String?
+            switch comparison.op.symbol {
+            case "==": suffix = "Equal"
+            case "!=": suffix = "NotEqual"
+            case ">": suffix = "GreaterThan"
+            case ">=": suffix = "GreaterThanOrEqual"
+            case "<": suffix = "LessThan"
+            case "<=": suffix = "LessThanOrEqual"
+            default: suffix = nil
+            }
+            if let suffix {
+                let messages = args.dropFirst().compactMap { argument -> LabeledValue<Expression>? in
+                    if argument.label?.text == "sourceLocation" { return nil }
+                    return LabeledValue(value: ExpressionDecoder.decode(syntax: argument.expression, in: syntaxTree))
                 }
-                return false
-            }), let op = elements[opIndex].as(BinaryOperatorExprSyntax.self) {
-                let opText = op.operator.text
-                let lhsElements = Array(elements[..<opIndex])
-                let rhsElements = Array(elements[(opIndex + 1)...])
-
-                // Reconstruct the LHS and RHS as expressions
-                let lhs: Expression
-                if lhsElements.count == 1 {
-                    lhs = ExpressionDecoder.decode(syntax: lhsElements[0], in: syntaxTree)
-                } else {
-                    // Re-wrap as a sequence expression for proper decoding
-                    let lhsSeq = SequenceExprSyntax(elements: ExprListSyntax(lhsElements))
-                    lhs = ExpressionDecoder.decode(syntax: lhsSeq, in: syntaxTree)
-                }
-
-                let rhs: Expression
-                if rhsElements.count == 1 {
-                    rhs = ExpressionDecoder.decode(syntax: rhsElements[0], in: syntaxTree)
-                } else {
-                    let rhsSeq = SequenceExprSyntax(elements: ExprListSyntax(rhsElements))
-                    rhs = ExpressionDecoder.decode(syntax: rhsSeq, in: syntaxTree)
-                }
-
-                // Find optional message argument
-                let msgArgs: [LabeledValue<Expression>] = args.dropFirst().compactMap { arg in
-                    if arg.label == nil || arg.label?.text == "sourceLocation" { return nil }
-                    return LabeledValue(value: ExpressionDecoder.decode(syntax: arg.expression, in: syntaxTree))
-                }
-
-                let funcName: String
-                switch opText {
-                case "==": funcName = "\(prefix)Equal"
-                case "!=": funcName = "\(prefix)NotEqual"
-                case ">": funcName = "\(prefix)GreaterThan"
-                case ">=": funcName = "\(prefix)GreaterThanOrEqual"
-                case "<": funcName = "\(prefix)LessThan"
-                case "<=": funcName = "\(prefix)LessThanOrEqual"
-                default: funcName = "\(prefix)True" // fallback
-                }
-                return FunctionCall(function: Identifier(name: funcName), arguments: [LabeledValue(value: lhs), LabeledValue(value: rhs)] + msgArgs, syntax: macroExpansionExpr)
+                return FunctionCall(function: Identifier(name: prefix + suffix), arguments: [
+                    LabeledValue(value: comparison.lhs), LabeledValue(value: comparison.rhs)
+                ] + messages, syntax: macroExpansionExpr)
             }
         }
 
         // Default: treat as a boolean condition check
-        var allArgs: [LabeledValue<Expression>] = [LabeledValue(value: ExpressionDecoder.decode(syntax: expression, in: syntaxTree))]
+        var allArgs: [LabeledValue<Expression>] = [LabeledValue(value: condition)]
         // Include any extra message arguments
         for arg in args.dropFirst() {
             if arg.label?.text == "sourceLocation" { continue }
@@ -1372,7 +1409,9 @@ final class MacroExpansion: Expression {
             return FunctionCall(function: Identifier(name: "\(prefix)True"), arguments: [LabeledValue(value: closureExpr)], trailingClosureCount: 1, syntax: macroExpansionExpr)
         }
 
-        return FunctionCall(function: Identifier(name: isThrowing ? "requireNotNil" : "\(prefix)True"), arguments: allArgs, syntax: macroExpansionExpr)
+        let call = FunctionCall(function: Identifier(name: isThrowing ? "requireNotNil" : "\(prefix)True"), arguments: allArgs, syntax: macroExpansionExpr)
+        call.isSwiftTestingRequirement = isThrowing
+        return call
     }
 
     private static func colorLiteral(syntax macroExpansionExpr: MacroExpansionExprSyntax) -> Expression {
@@ -1611,6 +1650,7 @@ final class NumericLiteral: Expression {
     let literal: String
     let isFloatingPoint: Bool
     var isAssignedToFloatingPoint = false
+    private var contextualNumericType: TypeSignature = .none
 
     init(literal: String, isFloatingPoint: Bool, syntax: SyntaxProtocol? = nil, sourceFile: Source.FilePath? = nil, sourceRange: Source.Range? = nil) {
         self.literal = literal
@@ -1633,8 +1673,20 @@ final class NumericLiteral: Expression {
         return NumericLiteral(literal: literal, isFloatingPoint: isFloatingPoint, syntax: syntax, sourceFile: syntaxTree.source.file, sourceRange: syntax.range(in: syntaxTree.source))
     }
 
+    override func inferTypes(context: TypeInferenceContext, expecting: TypeSignature) -> TypeInferenceContext {
+        var expected = expecting.asTypealiased(nil).withModuleName(nil)
+        while expected.isOptional || expected.isUnwrappedOptional { expected = expected.withoutOptionality() }
+        if expected == .float || expected == .double || (expected == .uint64 && !isFloatingPoint) {
+            contextualNumericType = expected
+        } else {
+            contextualNumericType = .none
+        }
+        isAssignedToFloatingPoint = contextualNumericType.isFloatingPoint
+        return context
+    }
+
     override var inferredType: TypeSignature {
-        return isFloatingPoint ? .double : .int
+        return contextualNumericType.or(isFloatingPoint ? .double : .int)
     }
 
     override var prettyPrintAttributes: [PrettyPrintTree] {
@@ -1898,6 +1950,15 @@ final class StringLiteral: Expression {
     let isMultiline: Bool
     var expressibleByStringLiteralType: TypeSignature?
     var expressibleByStringInterpolationType: (TypeSignature, TypeSignature)?
+    var expressibleByExtendedGraphemeClusterLiteralType: (TypeSignature, TypeSignature)?
+    var representedLiteralValue: String? {
+        if let literal = syntax?.as(StringLiteralExprSyntax.self) { return literal.representedLiteralValue }
+        guard !isInterpolated else { return nil }
+        return segments.compactMap { segment in
+            if case .string(let value) = segment { return value }
+            return nil
+        }.joined()
+    }
     var isInterpolated: Bool {
         return segments.contains {
             if case .expression = $0 {

@@ -724,6 +724,17 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         }
     }
 
+    /// Generic arguments carried by a nested Swift type include those on every
+    /// enclosing type. Keep `generics` as the innermost source arity.
+    var allGenericArguments: [TypeSignature] {
+        switch self {
+        case .member(let base, let member): return base.allGenericArguments + member.allGenericArguments
+        case .module(_, let type), .metaType(let type), .optional(let type), .unwrappedOptional(let type): return type.allGenericArguments
+        case .typealiased(_, let type): return type.allGenericArguments
+        default: return generics
+        }
+    }
+
     /// Apply the given generic types.
     func withGenerics(_ generics: [TypeSignature]) -> TypeSignature {
         switch self {
@@ -1047,7 +1058,10 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         guard !from.isEmpty, from.count == to.count else {
             return self
         }
-        let dict = Dictionary(uniqueKeysWithValues: zip(from, to))
+        // Nested signatures can repeat an inherited generic argument (for
+        // example an associated type specialized with the enclosing Element).
+        // Resolve repeated names from the innermost scope instead of trapping.
+        let dict = Dictionary(zip(from, to), uniquingKeysWith: { _, inner in inner })
         return mappingTypes(with: { dict[$0] })
     }
 
@@ -1086,7 +1100,7 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         case .named(let name, let generics):
             return .named(name, generics.map { $0.mappingTypes(with: map) })
         case .optional(let type):
-            return type.mappingTypes(with: map).asOptional(true)
+            return .optional(type.mappingTypes(with: map))
         case .range(let element):
             return .range(element?.mappingTypes(with: map))
         case .set(let element):
@@ -1149,7 +1163,7 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
                 return context.resolve(.named(name, generics), moduleName: moduleName)
             }
         case .optional(let type):
-            return type.resolved(in: node, declaringType: declaringType, moduleName: moduleName, context: context).asOptional(true)
+            return .optional(type.resolved(in: node, declaringType: declaringType, moduleName: moduleName, context: context))
         case .range(let elementType):
             return .range(elementType?.resolved(in: node, declaringType: declaringType, context: context))
         case .set(let elementType):
@@ -1243,7 +1257,7 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
         case .none:
             return typeSignature
         case .optional(let type):
-            return type.or(typeSignature).asOptional(true)
+            return .optional(type.or(typeSignature.asOptional(false)))
         case .range(let elementType):
             if case .range(let elementType2) = strippedTypeSignature {
                 let resolvedElementType = elementType2 == nil ? elementType : elementType?.or(elementType2!, replaceAny: replaceAny)
@@ -1412,13 +1426,15 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
     /// nil = Not compatible
     ///
     /// Compound types with multiple elements return an average of their elements' scores.
-    func compatibilityScore(target: TypeSignature, codebaseInfo: CodebaseInfo.Context, isLiteral: Bool = false, isInterpolated: Bool = false) -> Double? {
+    func compatibilityScore(target: TypeSignature, codebaseInfo: CodebaseInfo.Context, isLiteral: Bool = false, isInterpolated: Bool = false, isSingleGraphemeLiteral: Bool = false) -> Double? {
         let moduleName = self.moduleName
         let type = asTypealiased(nil).withExistentialMode(.none).withModuleName(nil)
         let targetIsOptional = target.isOptional
         let targetModuleName = target.moduleName
         let maybeSameModule = moduleName == nil || targetModuleName == nil || moduleName == targetModuleName
-        let strippedTarget = target.asTypealiased(nil).withoutOptionality().withExistentialMode(.none).withModuleName(nil)
+        // Removing one Optional layer can expose its payload's typealias.
+        // Resolve that alias too, while retaining any further Optional layers.
+        let strippedTarget = target.asTypealiased(nil).withoutOptionality().asTypealiased(nil).withExistentialMode(.none).withModuleName(nil)
         if type == strippedTarget && maybeSameModule {
             if type == .string {
                 // Favor using ExpressibleByStringLiteral or ExpressibleByStringInterpolation for literals
@@ -1538,6 +1554,8 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
                 return 2.0
             } else if isLiteral, target.compatibilityScore(target: .named("ExpressibleByStringLiteral", []), codebaseInfo: codebaseInfo) != nil {
                 return 2.0
+            } else if isLiteral && !isInterpolated && isSingleGraphemeLiteral, target.compatibilityScore(target: .named("ExpressibleByExtendedGraphemeClusterLiteral", []), codebaseInfo: codebaseInfo) != nil {
+                return 2.0
             }
         case .tuple(_, let types):
             if case .tuple(_, let targetTypes) = strippedTarget {
@@ -1568,6 +1586,22 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
             return 1.0
         case .named:
             if strippedTarget.isEquatable { return 1.9 }
+            if type.isSwiftBuiltinHashableScalar,
+               strippedTarget.isNamed("Hashable", generics: []),
+               targetModuleName == nil || targetModuleName == "Swift" || targetModuleName == "SkipLib" {
+                // Scalars conform to the real standard-library Hashable even
+                // when their symbol extensions omit inherited protocols. A
+                // same-named user declaration must not gain that conformance.
+                if let info = codebaseInfo.primaryTypeInfo(forNamed: target.withoutOptionality().asTypealiased(nil)) {
+                    if info.declarationType == .protocolDeclaration,
+                       info.moduleName == "Swift" || info.moduleName == "SkipLib" {
+                        return 1.9
+                    }
+                } else if targetModuleName == nil || targetModuleName == "Swift" {
+                    // Swift is implicitly imported in builtin-only contexts.
+                    return 1.9
+                }
+            }
             if strippedTarget.isSendable { return isSwiftBuiltinSendable ? 1.9 : nil }
             return nil
         case .composition:
@@ -1615,6 +1649,16 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
             level += 1.0
         }
         return nil
+    }
+
+    private var isSwiftBuiltinHashableScalar: Bool {
+        switch self {
+        case .bool, .character, .string, .int, .int8, .int16, .int32, .int64, .int128,
+             .uint, .uint8, .uint16, .uint32, .uint64, .uint128, .float, .double:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Swift standard types that conform to Sendable (used when codebase lacks type info).

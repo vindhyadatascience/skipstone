@@ -89,16 +89,29 @@ final class NamingTests: XCTestCase {
         struct S {
             var object: S
         """, kotlin: """
-        @Suppress("MUST_BE_INITIALIZED")
+        import skip.lib.InOut
+
         internal class S: MutableStruct {
             internal var object_: S
-                get() = field.sref({ this.object_ = it })
+                get() = smodify_object_storage.sref({ this.object_ = it })
                 set(newValue) {
                     @Suppress("NAME_SHADOWING") val newValue = newValue.sref()
                     willmutate()
-                    field = newValue
+                    smodify_object_storage = newValue
                     didmutate()
                 }
+            private lateinit var smodify_object_storage: S
+            internal fun <R> smodify_object_(body: (InOut<S>) -> R): R {
+                willmutate()
+                try {
+                    return body(InOut({ smodify_object_storage }, { smodify_object_storage = it.sref() }))
+                } finally {
+                    try {
+                    } finally {
+                        didmutate()
+                    }
+                }
+            }
 
             constructor(object_: S) {
                 this.object_ = object_

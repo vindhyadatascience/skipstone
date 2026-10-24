@@ -24,6 +24,16 @@ public final class CodebaseInfo {
         }
     }
 
+    private var testableImportsBySource: [Source.FilePath: [String]] = [:]
+
+    /// Explicit testing dependencies whose translated producers preserve internal
+    /// Kotlin ABI. Used to configure compiler friendship, never inferred by name.
+    public var testableDependencyModuleNames: [String] {
+        let capable = Set(dependentModules.filter { $0.testingMetadata != nil }.compactMap(\.moduleName))
+        let requested = testableImportsBySource.values.flatMap { $0 }.map { Self.moduleNameMap[$0]?.first ?? $0 }
+        return Set(requested).intersection(capable).sorted()
+    }
+
     /// Names of modules this codebase re-exports via `@_exported import` declarations.
     ///
     /// When another module depends on this one, the transpiler will additionally emit imports
@@ -68,6 +78,7 @@ public final class CodebaseInfo {
     func gather(from syntaxTree: SyntaxTree) {
         assert(!isInUse)
         let importedModuleNames = syntaxTree.root.statements.importedModulePaths.compactMap(\.moduleName)
+        testableImportsBySource[syntaxTree.source.file] = syntaxTree.root.statements.testableImportedModulePaths.compactMap(\.moduleName)
         for exportedModuleName in syntaxTree.root.statements.exportedImportedModulePaths.compactMap(\.moduleName) {
             // Only record `@_exported` targets that are themselves Skip modules — i.e. ones we either have
             // a `ModuleExport` for (transpiled by Skip in this build), or that map onto a Skip module via
@@ -109,6 +120,17 @@ public final class CodebaseInfo {
                 break
             }
         }
+        // Local declarations are emitted as private top-level types. Their names
+        // are lexically qualified before gathering, so sibling scopes stay distinct.
+        syntaxTree.root.visit { node in
+            if let declaration = node as? TypeDeclaration, declaration.isLocalType {
+                let info = TypeInfo(statement: declaration, codebaseInfo: self, syntaxTree: syntaxTree)
+                info.importedModuleNames = importedModuleNames
+                rootTypes.append(info)
+                needsVariableTypeInference = needsVariableTypeInference || info.needsVariableTypeInference
+            }
+            return .recurse(nil)
+        }
         // Save the syntax trees that have members requiring additional type inference
         if needsVariableTypeInference {
             typeInferenceTrees[syntaxTree.source.file] = syntaxTree
@@ -128,6 +150,7 @@ public final class CodebaseInfo {
         resolveTypeSignatures()
         fixupGenericsInfo()
         addGeneratedConstructors()
+        constructorsReady = true
         addGeneratedRawValues()
         addMainActorFlags()
         buildItemsByName() // Final mappings after updates
@@ -135,15 +158,65 @@ public final class CodebaseInfo {
         languageAdditions?.prepareForUse(codebaseInfo: self)
     }
     
-    /// Create a context that can access the given imported modules.
-    func context(importedModuleNames: [String] = [], sourceFile: Source.FilePath? = nil) -> Context {
-        return context(importedModuleNames: importedModuleNames, sourceFile: sourceFile, cache: ContextCache())
+    /// Register generated modify accessors during transformer preflight, before
+    /// parallel translation begins. Export the actual capability rather than
+    /// asking consumers to infer it from stripped dependency declarations.
+    func markScopedModifyProperties(_ properties: [(type: TypeSignature, name: String, sourceFile: Source.FilePath?)]) {
+        func mark(_ info: TypeInfo) {
+            let targets = properties.filter {
+                $0.type.isSameType(as: info.signature) && ($0.sourceFile == nil || $0.sourceFile == info.sourceFile)
+            }
+            for index in info.variables.indices {
+                var flags = info.variables[index].apiFlags ?? APIFlags()
+                flags.options.remove(.scopedModify)
+                if targets.contains(where: { $0.name == info.variables[index].name }) {
+                    flags.options.insert(.scopedModify)
+                }
+                info.variables[index].apiFlags = flags
+            }
+            info.types.forEach(mark)
+        }
+        rootTypes.forEach(mark)
+        rootExtensions.forEach(mark)
+        buildItemsByName()
     }
 
-    private func context(importedModuleNames: [String], sourceFile: Source.FilePath?, cache: ContextCache) -> Context {
+    /// Only producers emitting nonescaping scalar readers advertise this bit.
+    /// The older modify capability does not imply these readers exist.
+    func markScopedCollectionReadProperties(_ properties: [(type: TypeSignature, name: String, sourceFile: Source.FilePath?)]) {
+        func mark(_ info: TypeInfo) {
+            let targets = properties.filter {
+                $0.type.isSameType(as: info.signature) && ($0.sourceFile == nil || $0.sourceFile == info.sourceFile)
+            }
+            for index in info.variables.indices {
+                var flags = info.variables[index].apiFlags ?? APIFlags()
+                flags.options.remove(.scopedCollectionRead)
+                if targets.contains(where: { $0.name == info.variables[index].name }) {
+                    flags.options.insert(.scopedCollectionRead)
+                }
+                info.variables[index].apiFlags = flags
+            }
+            info.types.forEach(mark)
+        }
+        rootTypes.forEach(mark)
+        rootExtensions.forEach(mark)
+        buildItemsByName()
+    }
+
+    /// Create a context that can access the given imported modules.
+    func context(importedModuleNames: [String] = [], testableImportedModuleNames: [String]? = nil, sourceFile: Source.FilePath? = nil) -> Context {
+        return context(importedModuleNames: importedModuleNames, testableImportedModuleNames: testableImportedModuleNames, sourceFile: sourceFile, cache: ContextCache())
+    }
+
+    private func context(importedModuleNames: [String], testableImportedModuleNames: [String]? = nil, sourceFile: Source.FilePath?, cache: ContextCache) -> Context {
         let mappedModuleNames = importedModuleNames.flatMap { Self.moduleNameMap[$0] ?? [$0] }
         let expandedModuleNames = expandWithExportedImports(in: mappedModuleNames)
-        return Context(global: self, importedModuleNames: expandedModuleNames, sourceFile: sourceFile, cache: cache)
+        let explicitlyTestable = testableImportedModuleNames ?? sourceFile.flatMap { testableImportsBySource[$0] } ?? []
+        // Testing access is explicit, file-local and never follows re-exports.
+        // Only translated producers advertising a testing payload support it.
+        let capable = Set(dependentModules.filter { $0.testingMetadata != nil }.compactMap(\.moduleName))
+        let testable = Set(explicitlyTestable.map { Self.moduleNameMap[$0]?.first ?? $0 }).intersection(capable)
+        return Context(global: self, importedModuleNames: expandedModuleNames, testableImportedModuleNames: testable, sourceFile: sourceFile, cache: cache)
     }
 
     /// Whether the given Swift module name refers to a Skip-transpiled module — either one transpiled in
@@ -304,13 +377,15 @@ public final class CodebaseInfo {
     struct Context {
         let global: CodebaseInfo
         let importedModuleNames: Set<String>
+        let testableImportedModuleNames: Set<String>
         let sourceFile: Source.FilePath?
         private let cache: ContextCache
 
-        fileprivate init(global: CodebaseInfo, importedModuleNames: Set<String>, sourceFile: Source.FilePath?, cache: ContextCache) {
+        fileprivate init(global: CodebaseInfo, importedModuleNames: Set<String>, testableImportedModuleNames: Set<String>, sourceFile: Source.FilePath?, cache: ContextCache) {
             self.global = global
             self.sourceFile = sourceFile
             self.importedModuleNames = importedModuleNames
+            self.testableImportedModuleNames = testableImportedModuleNames
             self.cache = cache
         }
         
@@ -328,9 +403,35 @@ public final class CodebaseInfo {
         ///
         /// A score of 0 indicates that the item is not visible.
         func rankScore(of item: CodebaseInfoItem) -> Int {
+            if item.moduleName != global.moduleName {
+                guard importedVisibilityAllows(item) else { return 0 }
+                // A public nested declaration is still inaccessible through an
+                // internal/private enclosing type on an ordinary import.
+                var declaringType = item.declaringType
+                var visited: Set<TypeSignature> = []
+                while let parent = declaringType, visited.insert(parent).inserted {
+                    // A builtin/external extended type may have no producer
+                    // declaration in this codebase. Check every known enclosing
+                    // declaration; absence is not evidence of internal access.
+                    guard let info = global.typeInfos(forNamed: parent).first(where: { $0.declarationType != .extensionDeclaration }) else { break }
+                    guard importedVisibilityAllows(info) else { return 0 }
+                    declaringType = info.declaringType
+                }
+            }
             return item.rankScore(moduleName: global.moduleName, importedModuleNames: importedModuleNames, sourceFile: sourceFile)
         }
         
+        private func importedVisibilityAllows(_ item: CodebaseInfoItem) -> Bool {
+            // An extension is a lookup container, not an exported declaration's
+            // access level. Its members carry their own Swift visibility.
+            if item.declarationType == .extensionDeclaration { return true }
+            switch item.modifiers.visibility {
+            case .public, .open: return true
+            case .default, .internal: return item.moduleName.map { testableImportedModuleNames.contains($0) } ?? false
+            case .private, .fileprivate: return false
+            }
+        }
+
         /// Return all type infos visible for the given type.
         func typeInfos(forNamed type: TypeSignature) -> [TypeInfo] {
             return global.typeInfos(forNamed: type, candidateMap: ranked)
@@ -588,7 +689,7 @@ public final class CodebaseInfo {
                 return cached
             }
 
-            let candidates = Self.dedupe(functionCandidates(name: name, in: type, constrainedGenerics: type.generics, arguments: arguments, excludeConstrainedExtensions: excludeConstrainedExtensions))
+            let candidates = Self.dedupe(functionCandidates(name: name, in: type, constrainedGenerics: type.allGenericArguments, arguments: arguments, excludeConstrainedExtensions: excludeConstrainedExtensions))
             let sortedCandidates = candidates.sorted { $0.score > $1.score || ($0.score == $1.score && $0.level < $1.level) }
             let ret: [APIMatch]
             if let topCandidate = sortedCandidates.first {
@@ -611,7 +712,11 @@ public final class CodebaseInfo {
 
         /// If the given function signature can be called with the given arguments, return the call signature.
         func callableSignature(of functionSignature: TypeSignature, generics: Generics? = nil, arguments: [LabeledValue<ArgumentValue>]) -> TypeSignature? {
-            return matchFunction(signature: functionSignature, generics: generics, declarationType: .functionDeclaration, availability: .available, arguments: arguments, level: 0)?.match.signature
+            return callableMatch(of: functionSignature, generics: generics, arguments: arguments)?.signature
+        }
+
+        func callableMatch(of functionSignature: TypeSignature, generics: Generics? = nil, arguments: [LabeledValue<ArgumentValue>]) -> APIMatch? {
+            return matchFunction(signature: functionSignature, generics: generics, declarationType: .functionDeclaration, availability: .available, arguments: arguments, level: 0)?.match
         }
         
         /// Return the signatures of the possible subscripts being called with the given arguments.
@@ -635,7 +740,7 @@ public final class CodebaseInfo {
 
             var candidates: Set<FunctionCandidate> = []
             for typeInfo in typeInfos(forNamed: type) {
-                subscriptCandidates(in: typeInfo, constrainedGenerics: type.generics, arguments: arguments, isStatic: isStatic).forEach { candidates.insert($0) }
+                subscriptCandidates(in: typeInfo, constrainedGenerics: type.allGenericArguments, arguments: arguments, isStatic: isStatic).forEach { candidates.insert($0) }
             }
             let sortedCandidates = candidates.sorted { $0.score > $1.score || ($0.score == $1.score && $0.level < $1.level) }
             guard let topCandidate = sortedCandidates.first else {
@@ -647,7 +752,7 @@ public final class CodebaseInfo {
         /// Return the associated values of the given enum case.
         func associatedValueSignatures(of member: String, inConstrained type: TypeSignature) -> [TypeSignature.Parameter] {
             for typeInfo in typeInfos(forNamed: type) {
-                if let types = associatedValueSignatures(of: member, in: typeInfo, constrainedGenerics: type.generics) {
+                if let types = associatedValueSignatures(of: member, in: typeInfo, constrainedGenerics: type.allGenericArguments) {
                     return types
                 }
             }
@@ -671,7 +776,7 @@ public final class CodebaseInfo {
                 if excludeConstrainedExtensions && typeInfo.declarationType == .extensionDeclaration && typeInfo.generics != primaryTypeInfo?.generics {
                     continue
                 }
-                if let match = matchIdentifier(name: name, in: typeInfo, constrainedGenerics: type.generics, isStatic: isStatic, functionMatch: functionMatch) {
+                if let match = matchIdentifier(name: name, in: typeInfo, constrainedGenerics: type.allGenericArguments, isStatic: isStatic, functionMatch: functionMatch) {
                     return match
                 }
             }
@@ -687,11 +792,11 @@ public final class CodebaseInfo {
                 // Enum cases with associated values are modeled as functions, but can also be used as identifiers
                 let signature: TypeSignature
                 if memberInfo.declarationType == .enumCaseDeclaration {
-                    signature = typeInfo.signature.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics)
+                    signature = typeInfo.signature.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics)
                 } else if memberInfo is TypeInfo || memberInfo.declarationType == .typealiasDeclaration {
-                    signature = memberInfo.signature.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics).asMetaType(true)
+                    signature = memberInfo.signature.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics).asMetaType(true)
                 } else {
-                    signature = memberInfo.signature.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics)
+                    signature = memberInfo.signature.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics)
                 }
                 var match = memberInfo.apiMatch
                 match.signature = signature
@@ -703,7 +808,7 @@ public final class CodebaseInfo {
             }
             for inherits in typeInfo.inherits {
                 for inheritsInfo in typeInfos(forNamed: inherits) {
-                    let inheritsConstraints = inherits.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics).generics
+                    let inheritsConstraints = inherits.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics).allGenericArguments
                     if let match = matchIdentifier(name: name, in: inheritsInfo, constrainedGenerics: inheritsConstraints, isStatic: isStatic, functionMatch: functionMatch) {
                         return match
                     }
@@ -791,7 +896,7 @@ public final class CodebaseInfo {
             }
             for inherits in typeInfo.inherits {
                 for inheritsInfo in typeInfos(forNamed: inherits) {
-                    let inheritsConstraints = inherits.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics).generics
+                    let inheritsConstraints = inherits.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics).allGenericArguments
                     candidates += functionCandidates(name: name, in: inheritsInfo, constrainedGenerics: inheritsConstraints, arguments: arguments, isStatic: isStatic, level: level + 1)
                 }
             }
@@ -815,7 +920,7 @@ public final class CodebaseInfo {
             }
             for inherits in typeInfo.inherits {
                 for inheritsInfo in typeInfos(forNamed: inherits) {
-                    let inheritsConstraints = inherits.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics).generics
+                    let inheritsConstraints = inherits.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics).allGenericArguments
                     candidates += subscriptCandidates(in: inheritsInfo, constrainedGenerics: inheritsConstraints, arguments: arguments, isStatic: isStatic, level: level + 1)
                 }
             }
@@ -834,7 +939,7 @@ public final class CodebaseInfo {
             } else {
                 var typeInfoGenerics = primaryTypeInfo.generics
                 if let contextTypeInfo {
-                    typeInfoGenerics = typeInfoGenerics.merge(overrides: Generics(contextTypeInfo.signature.generics, whereEqual: constrainedGenerics))
+                    typeInfoGenerics = typeInfoGenerics.merge(overrides: Generics(contextTypeInfo.signature.allGenericArguments, whereEqual: constrainedGenerics))
                 }
                 typeInfoConstrainedGenerics = typeInfoGenerics.entries.map { $0.constrainedType(fallback: .any) }
             }
@@ -847,7 +952,7 @@ public final class CodebaseInfo {
             
             // If we don't have any matches and this appears to be a constructor, treat it as one. We take advantage of this
             // while inferring the types of variable values in prepareForUse(), before we've called generateConstructors()
-            if initSignatures.isEmpty {
+            if initSignatures.isEmpty && !global.constructorsReady && primaryTypeInfo.moduleName == global.moduleName {
                 initSignatures.append(syntheticInitCandidate(for: primaryTypeInfo.signature, arguments: arguments, apiFlags: primaryTypeInfo.apiFlags ?? APIFlags(), availability: primaryTypeInfo.availability))
             }
             return initSignatures
@@ -863,7 +968,12 @@ public final class CodebaseInfo {
         private func typeNameFunctionCandidates(for type: TypeSignature, moduleName: String? = nil, constrainedGenerics: [TypeSignature], arguments: [LabeledValue<ArgumentValue>], excludeConstrainedExtensions: Bool) -> [FunctionCandidate] {
             switch type.withoutOptionality().withExistentialMode(.none) {
             case .member(let baseType, let type):
+                // The nested type's initializers were gathered directly. This
+                // second lookup is only for same-name functions on its owner;
+                // treating the nested declaration as another constructor can
+                // infer a different enclosing specialization for the same init.
                 return functionCandidates(name: type.name, in: baseType.asMetaType(true), constrainedGenerics: constrainedGenerics, arguments: arguments, excludeConstrainedExtensions: excludeConstrainedExtensions)
+                    .filter { $0.match.declarationType != .initDeclaration }
             case .module(let moduleName, let type):
                 return typeNameFunctionCandidates(for: type, moduleName: moduleName, constrainedGenerics: constrainedGenerics, arguments: arguments, excludeConstrainedExtensions: excludeConstrainedExtensions)
             case .typealiased(let alias, _):
@@ -887,7 +997,7 @@ public final class CodebaseInfo {
             guard case .function(let parameters, _, _, _) = memberInfo.signature else {
                 return nil
             }
-            return parameters.map { $0.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics) }
+            return parameters.map { $0.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics) }
         }
 
         private func matchTuple(_ signature: TypeSignature, arguments: [LabeledValue<ArgumentValue>]) -> TypeSignature {
@@ -918,10 +1028,10 @@ public final class CodebaseInfo {
             var availability = availability
             if let typeInfo {
                 constrainedParameters = parameters.map {
-                    $0.mappingTypes(from: typeInfo.signature.generics, to: constrainedGenerics)
+                    $0.mappingTypes(from: typeInfo.signature.allGenericArguments, to: constrainedGenerics)
                 }
                 generics = typeInfo.generics.merge(overrides: generics, addNew: true)
-                generics = generics.merge(overrides: Generics(typeInfo.signature.generics, whereEqual: constrainedGenerics), addNew: true)
+                generics = generics.merge(overrides: Generics(typeInfo.signature.allGenericArguments, whereEqual: constrainedGenerics), addNew: true)
                 availability = availability.least(typeInfo.availability)
             }
             constrainedParameters = constrainedParameters.map { $0.constrainedTypeWithGenerics(generics) }
@@ -981,11 +1091,27 @@ public final class CodebaseInfo {
             // using the result to fill in generic types in the return type and matching parameters
             let matchingOriginalSignature: TypeSignature = .function(matchingOriginalParameters, signature.returnType, apiFlags, attributes)
             let matchingParameterSignature: TypeSignature = .function(matchingParameters, returnType, apiFlags, attributes)
-            let matchingGenerics = matchingOriginalSignature.mergeGenericMappings(in: matchingParameterSignature, with: generics)
+            let matchingGenerics = refiningDependentGenericMappings(
+                matchingOriginalSignature.mergeGenericMappings(in: matchingParameterSignature, with: generics)
+            )
             let mappedSignature = matchingOriginalSignature.constrainedTypeWithGenerics(matchingGenerics)
             let mappedParameters = mappedSignature.parameters
             for i in 0..<matchingParameters.count {
-                matchingParameters[i] = matchingParameters[i].or(mappedParameters[i], replaceAny: true)
+                // Only a literal may be re-contextualized as a concrete sequence
+                // element type. Preserve precise actual function/tuple/alias
+                // signatures for all other arguments.
+                if arguments[i].value.isArrayLiteral,
+                   let element = arrayLiteralElement(in: mappedParameters[i].type),
+                   isConcreteLiteralElement(element, generics: matchingGenerics) {
+                    matchingParameters[i] = mappedParameters[i].or(matchingParameters[i], replaceAny: true)
+                } else if arguments[i].value.isNumericLiteral,
+                          mappedParameters[i].type.asTypealiased(nil).withoutOptionality().withModuleName(nil) == .uint64 {
+                    // A source integer literal takes the API's UInt64 context;
+                    // an already-typed integer expression keeps its own type.
+                    matchingParameters[i] = mappedParameters[i].or(matchingParameters[i], replaceAny: true)
+                } else {
+                    matchingParameters[i] = matchingParameters[i].or(mappedParameters[i], replaceAny: true)
+                }
             }
             let memberOf: (TypeSignature, TypeSignature?)?
             if let signature = typeInfo?.signature {
@@ -993,8 +1119,52 @@ public final class CodebaseInfo {
             } else {
                 memberOf = nil
             }
-            let match = APIMatch(signature: .function(matchingParameters, mappedSignature.returnType, apiFlags, attributes), apiFlags: apiFlags, declarationType: declarationType, memberOf: memberOf, attributes: attributes, availability: availability)
+            let match = APIMatch(signature: .function(matchingParameters, mappedSignature.returnType, apiFlags, attributes), apiFlags: apiFlags, declarationType: declarationType, memberOf: memberOf, attributes: attributes, availability: availability, hasOmittedTrailingParameters: parameterIndex < parameters.count)
             return FunctionCandidate(match: match, score: totalScore, level: level)
+        }
+
+        /// Replay concrete equalities through their conformance constraints. For example,
+        /// inferring C == [Entry] must also infer E == Entry from C: Collection<E>.
+        private func refiningDependentGenericMappings(_ generics: Generics) -> Generics {
+            var result = generics
+            for _ in 0..<generics.entries.count {
+                var concreteMappings = Generics()
+                concreteMappings.entries = result.entries.filter { entry in
+                    guard let type = entry.whereEqual else { return false }
+                    // An untyped closure/key path can provisionally infer Any or none.
+                    // Replaying that mapping would erase a concrete dependent inference.
+                    return isConcreteLiteralElement(type, generics: result)
+                }
+                let refined = result.merge(overrides: concreteMappings)
+                guard refined != result else { break }
+                result = refined
+            }
+            return result
+        }
+
+        private func arrayLiteralElement(in formalType: TypeSignature) -> TypeSignature? {
+            let type = formalType.asTypealiased(nil).withoutOptionality().withExistentialMode(.none).withModuleName(nil)
+            switch type {
+            case .array(let element), .set(let element): return element
+            case .named("Sequence", let arguments) where arguments.count == 1:
+                guard let info = primaryTypeInfo(forNamed: formalType), info.declarationType == .protocolDeclaration,
+                      info.moduleName == nil || info.moduleName == "Swift" || info.moduleName == "SkipLib" else { return nil }
+                return arguments[0]
+            default: return nil
+            }
+        }
+
+        private func isConcreteLiteralElement(_ element: TypeSignature, generics: Generics) -> Bool {
+            guard element.isFullySpecified else { return false }
+            var concrete = true
+            element.visit { type in
+                if type == .any || type == .none || generics.entries.contains(where: { type == $0.namedType }) {
+                    concrete = false
+                    return .skip
+                }
+                return .recurse(nil)
+            }
+            return concrete
         }
 
         private func matchArgument(at argumentIndex: Int, in arguments: [LabeledValue<ArgumentValue>], isVariadicContinuation: Bool = false, to parameters: [TypeSignature.Parameter], isSubscript: Bool = false, startIndex: Int) -> (index: Int, score: Double)? {
@@ -1007,7 +1177,7 @@ public final class CodebaseInfo {
                         return nil
                     }
                     // If there is a label, then it either has to match or we have to be able to skip this parameter
-                    if label == parameter.label, let score = argument.value.type.compatibilityScore(target: parameter.type, codebaseInfo: self, isLiteral: argument.value.isLiteral, isInterpolated: argument.value.isInterpolated) {
+                    if label == parameter.label, let score = argument.value.type.compatibilityScore(target: parameter.type, codebaseInfo: self, isLiteral: argument.value.isLiteral, isInterpolated: argument.value.isInterpolated, isSingleGraphemeLiteral: argument.value.isSingleGraphemeLiteral) {
                         return (startIndex + index, 1.0 + score)
                     } else if !parameter.hasDefaultValue {
                         return nil
@@ -1016,9 +1186,9 @@ public final class CodebaseInfo {
                     // If there is no label, then either this parameter has to have no label, be a variadic continuation, or be a trailing closure.
                     // We don't give the extra point for a nil label on a function parameter to avoid advantaging trailing closures on nil-labeled
                     // params over other trailing closures
-                    if (isVariadicContinuation || (parameter.label == nil && !argument.value.isFirstTrailingClosure) || isSubscript), let score = argument.value.type.compatibilityScore(target: parameter.type, codebaseInfo: self, isLiteral: argument.value.isLiteral, isInterpolated: argument.value.isInterpolated) {
+                    if (isVariadicContinuation || (parameter.label == nil && !argument.value.isFirstTrailingClosure) || isSubscript), let score = argument.value.type.compatibilityScore(target: parameter.type, codebaseInfo: self, isLiteral: argument.value.isLiteral, isInterpolated: argument.value.isInterpolated, isSingleGraphemeLiteral: argument.value.isSingleGraphemeLiteral) {
                         return (startIndex + index, 1.0 + score)
-                    } else if argument.value.isFirstTrailingClosure, let score = argument.value.type.compatibilityScore(target: parameter.type, codebaseInfo: self, isLiteral: argument.value.isLiteral, isInterpolated: argument.value.isInterpolated) {
+                    } else if argument.value.isFirstTrailingClosure, let score = argument.value.type.compatibilityScore(target: parameter.type, codebaseInfo: self, isLiteral: argument.value.isLiteral, isInterpolated: argument.value.isInterpolated, isSingleGraphemeLiteral: argument.value.isSingleGraphemeLiteral) {
                         if argumentIndex == arguments.count - 1 && startIndex + index < parameters.count - 1 && parameter.hasDefaultValue && parameters[(startIndex + index + 1)...].contains(where: { !$0.hasDefaultValue }) {
                             // If this trailing closure is the last supplied argument, save it for the next required parameter
                             // even if it matches this defaulted parameter. Handles the case of a defaulted closure parameter
@@ -1147,6 +1317,7 @@ public final class CodebaseInfo {
     private var itemsByName: [String: [CodebaseInfoItem]] = [:]
     private var messages: [Source.FilePath: [Message]] = [:]
     private var isInUse = false
+    private var constructorsReady = false
     private var typeInferenceTrees: [Source.FilePath: SyntaxTree] = [:]
     
     private func buildItemsByName() {
@@ -1161,6 +1332,8 @@ public final class CodebaseInfo {
     }
     
     private static func addModuleExport(_ export: ModuleExport, to itemsByName: inout [String: [CodebaseInfoItem]]) {
+        // Keep one canonical copy of each item; Context applies import access.
+        let export = export.testingMetadata ?? export
         export.rootTypes.forEach { Self.addTypeInfo($0, to: &itemsByName) }
         export.rootExtensions.forEach { Self.addTypeInfo($0, to: &itemsByName) }
         export.rootTypealiases.forEach { Self.addItem($0, to: &itemsByName) }
@@ -1390,6 +1563,8 @@ public final class CodebaseInfo {
 
     private func addGeneratedConstructors() {
         rootTypes.forEach { addGeneratedConstructors(to: $0) }
+        // Extensions can declare nested types with their own implicit constructors.
+        rootExtensions.forEach { addGeneratedConstructors(to: $0) }
     }
 
     private func addGeneratedConstructors(to typeInfo: TypeInfo) {
@@ -1432,10 +1607,15 @@ public final class CodebaseInfo {
     }
 
     private func addMemberwiseConstructor(to typeInfo: TypeInfo) {
-        let parameters = typeInfo.declarationType != .structDeclaration ? [] : typeInfo.variables.compactMap { (variable) -> TypeSignature.Parameter? in
-            guard variable.isInitializable else {
-                return nil
-            }
+        // Environment and focus wrappers initialize their backing storage rather than
+        // accepting a memberwise value (matching KotlinStructTransformer). They must
+        // also not make the remaining synthesized initializer private. hasValue is
+        // insufficient here: it includes Optional's implicit nil, not just written values.
+        let initializableVariables = typeInfo.variables.filter { variable in
+            variable.isInitializable && variable.attributes.environmentAttribute == nil
+                && !variable.attributes.contains(.focusState)
+        }
+        let parameters = typeInfo.declarationType != .structDeclaration ? [] : initializableVariables.compactMap { (variable) -> TypeSignature.Parameter? in
             var parameterType = variable.signature
             if variable.attributes.contains(.binding) {
                 parameterType = parameterType.asBinding()
@@ -1448,7 +1628,14 @@ public final class CodebaseInfo {
             return TypeSignature.Parameter(label: variable.name, type: parameterType, hasDefaultValue: variable.hasValue)
         }
         let initSignature: TypeSignature = .function(parameters, typeInfo.signature, typeInfo.apiFlags ?? APIFlags(), nil)
-        var initInfo = FunctionInfo(name: "init", declarationType: .initDeclaration, signature: initSignature, moduleName: typeInfo.moduleName, sourceFile: typeInfo.sourceFile, declaringType: typeInfo.signature, modifiers: typeInfo.modifiers, attributes: Attributes(), availability: .available)
+        var initModifiers = typeInfo.modifiers
+        if typeInfo.declarationType == .structDeclaration {
+            initModifiers.visibility = min(initModifiers.visibility, .internal)
+            for variable in initializableVariables {
+                initModifiers.visibility = min(initModifiers.visibility, variable.modifiers.visibility)
+            }
+        }
+        var initInfo = FunctionInfo(name: "init", declarationType: .initDeclaration, signature: initSignature, moduleName: typeInfo.moduleName, sourceFile: typeInfo.sourceFile, declaringType: typeInfo.signature, modifiers: initModifiers, attributes: Attributes(), availability: .available)
         initInfo.isGenerated = true
         typeInfo.functions.append(initInfo)
     }
@@ -1471,6 +1658,28 @@ public final class CodebaseInfo {
             var rawValueInfo = VariableInfo(name: "rawValue", signature: inherits, moduleName: typeInfo.moduleName, sourceFile: typeInfo.sourceFile, declaringType: typeInfo.signature, modifiers: typeInfo.modifiers, attributes: Attributes(), availability: .available)
             rawValueInfo.isGenerated = true
             typeInfo.variables.append(rawValueInfo)
+        }
+
+        // Swift also synthesizes init?(rawValue:) for a raw-valued enum. Keep
+        // its real failable signature in metadata; constructor inference must
+        // not rely on the permissive pre-generation fallback for this API.
+        let extensions = rootExtensions.filter { $0.signature.isSameType(as: typeInfo.signature) }
+        let hasRawValueInitializer = ([typeInfo] + extensions).contains { declaration in
+            declaration.functions.contains { function in
+                guard function.declarationType == .initDeclaration else { return false }
+                let parameters = function.signature.parameters
+                return parameters.count == 1 && parameters[0].label == "rawValue"
+                    && parameters[0].type.isSameType(as: inherits)
+            }
+        }
+        if !hasRawValueInitializer {
+            let flags = typeInfo.apiFlags ?? APIFlags()
+            let signature = TypeSignature.function([.init(label: "rawValue", type: inherits)], .optional(typeInfo.signature), flags, nil)
+            var initializer = FunctionInfo(name: "init", declarationType: .initDeclaration, signature: signature,
+                moduleName: typeInfo.moduleName, sourceFile: typeInfo.sourceFile, declaringType: typeInfo.signature,
+                modifiers: typeInfo.modifiers, attributes: Attributes(), availability: typeInfo.availability)
+            initializer.isGenerated = true
+            typeInfo.functions.append(initializer)
         }
     }
 
@@ -1503,6 +1712,10 @@ public final class CodebaseInfo {
         var rootFunctions: [FunctionInfo] = []
         var rootExtensions: [TypeInfo] = []
 
+        /// A separate opt-in surface for translated Kotlin modules. The ordinary
+        /// root arrays remain public-only, including for older consumers.
+        private(set) var testingMetadata: ModuleExport?
+
         private var sourceFileTable: [String] = []
         private var sourceFileMapping: [String: Int] = [:]
         private var isPrepared = false
@@ -1517,9 +1730,17 @@ public final class CodebaseInfo {
             case rootExtensions = "e"
             case sourceFileTable = "stable"
             case exportedModuleNames = "x"
+            case testingMetadata = "testing"
         }
 
-        public init(of codebaseInfo: CodebaseInfo) {
+        public convenience init(of codebaseInfo: CodebaseInfo, includeTestingMetadata: Bool = false) {
+            self.init(of: codebaseInfo, exportingTestingSurface: false)
+            if includeTestingMetadata {
+                self.testingMetadata = ModuleExport(of: codebaseInfo, exportingTestingSurface: true)
+            }
+        }
+
+        private init(of codebaseInfo: CodebaseInfo, exportingTestingSurface: Bool) {
             self.moduleName = codebaseInfo.moduleName
             self.packageName = codebaseInfo.kotlin?.packageName
             // Store `nil` (not an empty array) when the module has no `@_exported import`s so the
@@ -1531,7 +1752,10 @@ public final class CodebaseInfo {
             // that modules depending on it have to re-transpile. Sort for stability. API within a file will always have been added in the
             // same order, so we only need to sort by file
             let sortBy: (CodebaseInfoItem, CodebaseInfoItem) -> Bool = { ($0.sourceFile?.path ?? "") < ($1.sourceFile?.path ?? "") }
-            let filter: (CodebaseInfoItem) -> Bool = { $0.modifiers.visibility == .public || $0.modifiers.visibility == .open || $0.declarationType == .extensionDeclaration }
+            let filter: (CodebaseInfoItem) -> Bool = {
+                if exportingTestingSurface { return $0.modifiers.visibility != .private && $0.modifiers.visibility != .fileprivate }
+                return $0.modifiers.visibility == .public || $0.modifiers.visibility == .open || $0.declarationType == .extensionDeclaration
+            }
 
             // Sort types before applying `export` so that the source file table that export builds is in stable order
             self.rootTypes = codebaseInfo.rootTypes.sorted(by: sortBy).compactMap { export(typeInfo: $0, filter: filter) }
@@ -1563,6 +1787,9 @@ public final class CodebaseInfo {
         }
 
         func prepareForUse() {
+            guard !isPrepared else { return }
+            isPrepared = true
+            testingMetadata?.prepareForUse()
             rootTypes.forEach { prepareForUse(typeInfo: $0) }
             rootTypealiases = rootTypealiases.map { repopulateSourceFile(for: $0) }
             rootVariables = rootVariables.map { repopulateSourceFile(for: $0) }
@@ -1638,6 +1865,9 @@ public final class CodebaseInfo {
 
         var generics: Generics
         var inherits: [TypeSignature]
+        /// Original enclosing parameter positions carried by Kotlin's static
+        /// nested type. Absent in older exports: retain their own-only ABI.
+        var kotlinCapturedOuterGenericIndices: [Int]?
 
         var types: [TypeInfo] = []
         var typealiases: [TypealiasInfo] = []
@@ -1668,7 +1898,7 @@ public final class CodebaseInfo {
             guard generics != primaryInfo.generics else {
                 return true
             }
-            let names = primaryInfo.signature.generics
+            let names = primaryInfo.signature.allGenericArguments
             guard names.count == constrainedGenerics.count else {
                 return true
             }
@@ -1683,22 +1913,28 @@ public final class CodebaseInfo {
 
         private enum CodingKeys: String, CodingKey {
             // Exclude language additions, importedModuleNames
-            case name = "n", declarationType = "t", signature = "s", moduleName = "m", sourceFileID = "sid", declaringType = "d", modifiers = "z", attributes = "a", availability = "v", apiFlags = "f", generics = "g", inherits = "i", types = "mt", typealiases = "ma", cases = "mc", variables = "mv", functions = "mf", subscripts = "ms"
+            case name = "n", declarationType = "t", signature = "s", moduleName = "m", sourceFileID = "sid", declaringType = "d", modifiers = "z", attributes = "a", availability = "v", apiFlags = "f", generics = "g", inherits = "i", types = "mt", typealiases = "ma", cases = "mc", variables = "mv", functions = "mf", subscripts = "ms", kotlinCapturedOuterGenericIndices = "kgc"
         }
 
         fileprivate init(statement: TypeDeclaration, in declaringType: TypeSignature? = nil, codebaseInfo: CodebaseInfo, syntaxTree: SyntaxTree) {
-            self.name = statement.name
+            self.name = statement.isLocalType ? statement.signature.name : statement.name
             self.declarationType = statement.type
             self.signature = statement.signature
             self.moduleName = codebaseInfo.moduleName
             self.sourceFile = statement.sourceFile
             self.declaringType = declaringType
-            self.modifiers = statement.modifiers
+            var modifiers = statement.modifiers
+            if statement.isLocalType { modifiers.visibility = .private }
+            self.modifiers = modifiers
             self.attributes = statement.attributes
             self.availability = Availability(attributes: statement.attributes)
             self.apiFlags = APIFlags(isMainActor: statement.attributes.contains(.mainActor))
             self.generics = statement.generics
             self.inherits = statement.inherits
+            // With no enclosing parameters there is no changed capture ABI.
+            // Preserve the previous byte-stable symbol encoding for such types.
+            self.kotlinCapturedOuterGenericIndices = statement.enclosingTypeGenericEntries.isEmpty
+                ? nil : statement.kotlinCapturedOuterGenericIndices
             addMembers(statement.members, codebaseInfo: codebaseInfo, syntaxTree: syntaxTree)
             (codebaseInfo.languageAdditions as? CodebaseInfoLanguageAdditionsGatherDelegate)?.codebaseInfo(codebaseInfo, didGather: self, from: statement, syntaxTree: syntaxTree)
         }
@@ -1738,6 +1974,7 @@ public final class CodebaseInfo {
             self.importedModuleNames = copy.importedModuleNames
             self.generics = copy.generics
             self.inherits = copy.inherits
+            self.kotlinCapturedOuterGenericIndices = copy.kotlinCapturedOuterGenericIndices
             self.types = copy.types
             self.typealiases = copy.typealiases
             self.cases = copy.cases

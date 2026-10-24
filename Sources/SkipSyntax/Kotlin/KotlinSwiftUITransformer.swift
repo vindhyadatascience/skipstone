@@ -33,7 +33,7 @@ final class KotlinSwiftUITransformer: KotlinTransformer {
             syntaxTree.root.visit(ifSkipBlockContent: syntaxTree.isBridgeFile, perform: visitor.visit)
             // Add Compose imports to the generated Kotlin for any transpiled SwiftUI, or for bridged files that define
             // transpiled views. We don't yet support bridging other transpiled SwiftUI constructs
-            if !isInSkipUI && (!syntaxTree.isBridgeFile || visitor.hasSwiftUIViews) {
+            if visitor.hasSwiftUIViews || (!isInSkipUI && !syntaxTree.isBridgeFile) {
                 addKotlinComposeDependencies(to: syntaxTree)
             }
         }
@@ -160,6 +160,18 @@ private final class TranslateVisitor {
     }
 
     private func translateClassDeclaration(_ classDeclaration: KotlinClassDeclaration) {
+        // Binding and Bindable are value wrappers, independent of rendering. View
+        // bodies synthesize these below; plain model/holder types need them too.
+        if !isSwiftUIType(named: "View", declaration: classDeclaration, type: classDeclaration.signature, codebaseInfo: translator.codebaseInfo)
+            && !isSwiftUIType(named: "ViewModifier", declaration: classDeclaration, type: classDeclaration.signature, codebaseInfo: translator.codebaseInfo) {
+            for variable in classDeclaration.members.compactMap({ $0 as? KotlinVariableDeclaration }) {
+                if variable.attributes.contains(.binding) {
+                    synthesizeBindingBacking(variable: variable)
+                } else if variable.attributes.contains(.bindable) {
+                    synthesizeStateBacking(variable: variable, propertyWrapperTypeName: "skip.ui.Bindable")
+                }
+            }
+        }
         for i in 0..<classDeclaration.inherits.count {
             if classDeclaration.inherits[i].isNamed("EnvironmentKey", moduleName: "SwiftUI") {
                 translateEnvironmentKey(classDeclaration, inheritsIndex: i)
@@ -354,6 +366,8 @@ private final class TranslateVisitor {
         if !stateVariables.isEmpty || !focusStateVariables.isEmpty || !environmentVariables.isEmpty || !appStorageVariables.isEmpty {
             let evaluateFunction = synthesizeEvaluateFunction(isModifier: isModifier, stateVariables: stateVariables, focusStateVariables: focusStateVariables, environmentVariables: environmentVariables, appStorageVariables: appStorageVariables)
             classDeclaration.insert(statements: [evaluateFunction], after: body)
+        } else if !isModifier, let keys = immutableBodyInputKeys(for: classDeclaration, body: body) {
+            classDeclaration.insert(statements: [synthesizeImmutableBodyEvaluate(keys: keys)], after: body)
         }
 
         for stateVariable in stateVariables {
@@ -379,6 +393,77 @@ private final class TranslateVisitor {
         for scaledMetricVariable in scaledMetricVariables {
             synthesizeScaledMetricBacking(variable: scaledMetricVariable)
         }
+    }
+
+    /// A retained builder may capture an old Self only when every stored input is equivalent.
+    /// Keep this proof conservative; arbitrary Swift equality is not a rendering identity.
+    private func immutableBodyInputKeys(for declaration: KotlinClassDeclaration, body: KotlinStatement) -> [String]? {
+        // Raw replacements may bypass the generated builder or immutable Swift field semantics.
+        guard declaration.extras?.directives.isEmpty != false, !hasRawBodyOverride(body) else { return nil }
+        guard declaration.declarationType == .structDeclaration, !declaration.isLocalType,
+              declaration.generics.isEmpty, declaration.signature.allGenericArguments.isEmpty,
+              let codebaseInfo = translator.codebaseInfo,
+              let capability = codebaseInfo.primaryTypeInfo(forNamed: .module("SkipUI", .named("SkipUIBodyEvaluationCapabilityV1", []))),
+              capability.moduleName == "SkipUI", capability.modifiers.visibility >= .public,
+              !codebaseInfo.typeInfos(forNamed: declaration.signature).contains(where: { info in
+                  info.functions.contains { $0.name == "Evaluate" && !$0.isStatic }
+              }),
+              !declaration.members.contains(where: { ($0 as? KotlinFunctionDeclaration)?.name == "Evaluate" }) else { return nil }
+        var keys: [String] = []
+        for variable in declaration.members.compactMap({ $0 as? KotlinVariableDeclaration }) {
+            guard !variable.isStatic, variable.propertyName != "body", variable.getter == nil else { continue }
+            guard variable.isLet, variable.attributes.isEmpty, variable.names.count == 1,
+                  variable.extras?.directives.isEmpty != false,
+                  !variable.modifiers.isLazy else { return nil }
+            let property = "this." + variable.propertyName.fixingKeyword(in: KotlinIdentifier.hardKeywords)
+            let type = variable.propertyType.asTypealiased(nil)
+            guard !type.isOptional, type.allGenericArguments.isEmpty else { return nil }
+            switch type.withModuleName(nil) {
+            case .bool, .character, .string, .int, .int8, .int16, .int32, .int64,
+                 .uint, .uint8, .uint16, .uint32, .uint64:
+                keys.append(property)
+            case .double:
+                keys.append("java.lang.Double.doubleToRawLongBits(\(property))")
+            case .float:
+                keys.append("java.lang.Float.floatToRawIntBits(\(property))")
+            default:
+                // SDK adapters can describe native value types as Kotlin classes. Only
+                // an actual class declaration in this consumer module proves reference identity.
+                guard let info = codebaseInfo.primaryTypeInfo(forNamed: type),
+                      info.declarationType == .classDeclaration,
+                      info.moduleName == codebaseInfo.global.moduleName else { return nil }
+                keys.append("skip.ui.bodyInputReference(\(property))")
+            }
+        }
+        return keys
+    }
+
+    private func hasRawBodyOverride(_ body: KotlinStatement) -> Bool {
+        var hasOverride = false
+        body.visit { node in
+            if node is KotlinRawStatement || node is KotlinRawExpression
+                || (node as? KotlinStatement)?.extras?.directives.isEmpty == false {
+                hasOverride = true
+            }
+            return hasOverride ? .skip : .recurse(nil)
+        }
+        return hasOverride
+    }
+
+    private func synthesizeImmutableBodyEvaluate(keys: [String]) -> KotlinStatement {
+        let function = KotlinFunctionDeclaration(name: "Evaluate")
+        function.modifiers.visibility = .public
+        function.modifiers.isOverride = true
+        function.annotations.append("@Composable")
+        function.returnType = .named("kotlin.collections.List", [.named("Renderable", [])])
+        function.parameters = [Parameter(externalLabel: "context", declaredType: .named("ComposeContext", [])),
+                               Parameter(externalLabel: "options", declaredType: .int)]
+        function.isGenerated = true
+        function.extras = .singleNewline
+        function.body = KotlinCodeBlock(statements: [KotlinRawStatement(sourceCode:
+            "return skip.ui.evaluateImmutableViewBody(context, options, kotlin.arrayOf<kotlin.Any?>(\(keys.joined(separator: ", ")))) { this.body() }")])
+        function.assignParentReferences()
+        return function
     }
 
     /// Create an override of the SkipUI `Evaluate` function on views and modifiers to handle state synchronization, etc.
