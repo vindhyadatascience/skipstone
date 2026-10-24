@@ -1611,33 +1611,57 @@ public final class CodebaseInfo {
         // accepting a memberwise value (matching KotlinStructTransformer). They must
         // also not make the remaining synthesized initializer private. hasValue is
         // insufficient here: it includes Optional's implicit nil, not just written values.
+        //
+        // Swift 6.4 also omits a property-wrapped stored property that has a default value
+        // and is private or fileprivate from every memberwise initializer.
+        let isStruct = typeInfo.declarationType == .structDeclaration
         let initializableVariables = typeInfo.variables.filter { variable in
             variable.isInitializable && variable.attributes.environmentAttribute == nil
                 && !variable.attributes.contains(.focusState)
+                && !(isStruct && variable.isMemberwiseExcludedWrapper)
         }
-        let parameters = typeInfo.declarationType != .structDeclaration ? [] : initializableVariables.compactMap { (variable) -> TypeSignature.Parameter? in
-            var parameterType = variable.signature
-            if variable.attributes.contains(.binding) {
-                parameterType = parameterType.asBinding()
-            } else if variable.attributes.contains(.viewBuilder), !variable.signature.isFunction, variable.apiFlags?.options.contains(.computed) == false {
-                // Swift generates a closure parameter that returns a view for stored @ViewBuilder variables
-                parameterType = .function([], variable.signature, APIFlags(), nil)
+        func initInfo(for variables: [VariableInfo], visibility: Modifiers.Visibility) -> FunctionInfo {
+            let parameters = !isStruct ? [] : variables.compactMap { (variable) -> TypeSignature.Parameter? in
+                var parameterType = variable.signature
+                if variable.attributes.contains(.binding) {
+                    parameterType = parameterType.asBinding()
+                } else if variable.attributes.contains(.viewBuilder), !variable.signature.isFunction, variable.apiFlags?.options.contains(.computed) == false {
+                    // Swift generates a closure parameter that returns a view for stored @ViewBuilder variables
+                    parameterType = .function([], variable.signature, APIFlags(), nil)
+                }
+                // Transfer attributes if variable is a closure, e.g. @ViewBuilder
+                parameterType = variable.attributes.apply(toFunction: parameterType)
+                return TypeSignature.Parameter(label: variable.name, type: parameterType, hasDefaultValue: variable.hasValue)
             }
-            // Transfer attributes if variable is a closure, e.g. @ViewBuilder
-            parameterType = variable.attributes.apply(toFunction: parameterType)
-            return TypeSignature.Parameter(label: variable.name, type: parameterType, hasDefaultValue: variable.hasValue)
-        }
-        let initSignature: TypeSignature = .function(parameters, typeInfo.signature, typeInfo.apiFlags ?? APIFlags(), nil)
-        var initModifiers = typeInfo.modifiers
-        if typeInfo.declarationType == .structDeclaration {
-            initModifiers.visibility = min(initModifiers.visibility, .internal)
-            for variable in initializableVariables {
-                initModifiers.visibility = min(initModifiers.visibility, variable.modifiers.visibility)
+            let initSignature: TypeSignature = .function(parameters, typeInfo.signature, typeInfo.apiFlags ?? APIFlags(), nil)
+            var initModifiers = typeInfo.modifiers
+            if isStruct {
+                initModifiers.visibility = visibility
             }
+            var initInfo = FunctionInfo(name: "init", declarationType: .initDeclaration, signature: initSignature, moduleName: typeInfo.moduleName, sourceFile: typeInfo.sourceFile, declaringType: typeInfo.signature, modifiers: initModifiers, attributes: Attributes(), availability: .available)
+            initInfo.isGenerated = true
+            return initInfo
         }
-        var initInfo = FunctionInfo(name: "init", declarationType: .initDeclaration, signature: initSignature, moduleName: typeInfo.moduleName, sourceFile: typeInfo.sourceFile, declaringType: typeInfo.signature, modifiers: initModifiers, attributes: Attributes(), availability: .available)
-        initInfo.isGenerated = true
-        typeInfo.functions.append(initInfo)
+        guard isStruct else {
+            typeInfo.functions.append(initInfo(for: initializableVariables, visibility: typeInfo.modifiers.visibility))
+            return
+        }
+        // Swift 6.4 memberwise access (verified against swiftc 6.4, Xcode 27):
+        // - The full initializer takes every memberwise property; its access is the
+        //   minimum of internal, the type, and every memberwise property.
+        // - When properties that have default values make it less accessible than the
+        //   required (non-defaulted) properties allow, Swift also synthesizes an
+        //   initializer at that higher access which omits those defaulted properties.
+        //   A View with `let x` and `@State private var y = 0`-style members is
+        //   therefore constructible as `T(x:)` from other files.
+        let required = initializableVariables.filter { !$0.hasMemberwiseDefaultValue }
+        let reducedVisibility = required.reduce(min(typeInfo.modifiers.visibility, .internal)) { min($0, $1.modifiers.visibility) }
+        let fullVisibility = initializableVariables.reduce(reducedVisibility) { min($0, $1.modifiers.visibility) }
+        typeInfo.functions.append(initInfo(for: initializableVariables, visibility: fullVisibility))
+        if fullVisibility < reducedVisibility {
+            let reduced = initializableVariables.filter { !$0.hasMemberwiseDefaultValue || $0.modifiers.visibility >= reducedVisibility }
+            typeInfo.functions.append(initInfo(for: reduced, visibility: reducedVisibility))
+        }
     }
 
     private func addGeneratedRawValues() {
@@ -2167,6 +2191,14 @@ public final class CodebaseInfo {
 
         let isInitializable: Bool
         let hasValue: Bool
+        /// Whether Swift's memberwise initializer gives this property a default argument: a written
+        /// initial value, or a mutable Optional's implicit nil. Unlike `hasValue`, an Optional `let`
+        /// or `@Binding` has no default. Gathered from source only; not encoded (dependency exports
+        /// carry their already-generated initializers).
+        var hasMemberwiseDefaultValue = false
+        /// Whether this is a property-wrapped stored property with a default value and less than
+        /// internal access, which Swift 6.4 omits from every memberwise initializer.
+        var isMemberwiseExcludedWrapper = false
         var typeInferenceValue: Any?
         var isGenerated = false
 
@@ -2187,6 +2219,11 @@ public final class CodebaseInfo {
             self.apiFlags = statement.apiFlags
             self.isInitializable = !statement.modifiers.isStatic && !statement.modifiers.isOverride && statement.getter == nil && (!statement.isLet || statement.value == nil)
             self.hasValue = self.signature.isOptional || statement.value != nil
+            let isWrapped = statement.attributes.isPropertyWrapper
+            self.hasMemberwiseDefaultValue = statement.value != nil
+                || (self.signature.isOptional && !statement.isLet && !statement.attributes.contains(.binding))
+            // `.default` (no modifier) is internal; only private and fileprivate are below it.
+            self.isMemberwiseExcludedWrapper = isWrapped && self.hasMemberwiseDefaultValue && statement.modifiers.visibility < .default
             if !self.signature.isFullySpecified, self.sourceFile != nil, let value = statement.value {
                 // We'll try to infer the type after gathering all info
                 self.typeInferenceValue = value

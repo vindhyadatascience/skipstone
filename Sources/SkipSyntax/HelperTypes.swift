@@ -250,6 +250,22 @@ struct Attributes: Hashable, PrettyPrintable, Codable {
         return contains(.appStorage) || contains(.bindable) || contains(.binding) || contains(.environment) || contains(.environmentObject) || contains(.focusState) || contains(.gestureState) || contains(.nonmutating) || contains(.observedObject) || contains(.scaledMetric) || contains(.state) || contains(.stateObject)
     }
 
+    /// Whether these attributes include a property wrapper: a known SwiftUI/Observation wrapper,
+    /// or an unrecognized capitalized attribute (a custom `@propertyWrapper`, `@SceneStorage`, ...).
+    var isPropertyWrapper: Bool {
+        return attributes.contains { attribute in
+            switch attribute.kind {
+            case .appStorage, .bindable, .binding, .environment, .environmentObject, .focusState, .gestureState, .observedObject, .published, .scaledMetric, .state, .stateObject:
+                return true
+            case .unknown:
+                guard case .named(let name, _) = attribute.signature, let first = name.first else { return false }
+                return first.isUppercase
+            default:
+                return false
+            }
+        }
+    }
+
     /// Convenience to retrieve any @Environment or @EnvironmentObject attribute.
     var environmentAttribute: Attribute? {
         return attributes.first(where: { $0.kind == .environment || $0.kind == .environmentObject })
