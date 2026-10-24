@@ -862,6 +862,14 @@ final class FunctionCall: Expression, APICallExpression, MemberAccessExpression 
             isInit = match.1.declarationType == .initDeclaration
             apiMatch = match.1
             returnType = match.0.returnType.or(expecting)
+            // `T<X>(...)` has type `T<X>`. Matching against the declaration can map an enclosing
+            // generic `X` to its constraint (Any), e.g. `Gate<Request>()` inside `Session<Request>`
+            // with `Request: Equatable & Sendable`; keep the explicit specialization.
+            if isInit, name == nil, let baseType, explicitGenerics?.isEmpty == false,
+               baseType.generics.count == returnType.asOptional(false).generics.count,
+               baseType.withGenerics([]) == returnType.asOptional(false).withGenerics([]) {
+                returnType = returnType.isOptional ? baseType.asOptional(true) : baseType
+            }
             if isUnchainedOptional {
                 isCallOnOptional = true
             }
