@@ -51,6 +51,7 @@ final class ContextualHashableMetadataTests: XCTestCase {
     }
 
     func testSDKFunctionPropertyOptionalCallbackResultsRecoverContextAcrossMetadata() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         import SDKMetadata
         class Cell: Renderable {}
@@ -71,6 +72,7 @@ final class ContextualHashableMetadataTests: XCTestCase {
     }
 
     func testSDKMemberReturnedDictionaryKeysRecoverContextAcrossMetadata() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         import SDKMetadata
         func read(_ response: UNNotificationResponse, _ key: String) {
@@ -87,6 +89,7 @@ final class ContextualHashableMetadataTests: XCTestCase {
         XCTAssertEqual(kotlin.components(separatedBy: "AnyHashable(").count - 1, 2, kotlin)
     }
     func testSDKInternalCollectorMetadataRequiresExplicitTestableImportForNestedFixture() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let source = """
         import SDKMetadata
         class Cell: Renderable {}
@@ -107,6 +110,7 @@ final class ContextualHashableMetadataTests: XCTestCase {
     }
 
     func testSDKCallbackContextSurvivesAStoredCollectorInAPrivateExtensionNestedFixture() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         @testable import SDKMetadata
         class Cell: Renderable {}

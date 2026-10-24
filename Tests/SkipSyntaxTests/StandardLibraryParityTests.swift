@@ -25,7 +25,8 @@ final class StandardLibraryParityTests: XCTestCase {
         return result
     }
 
-    func testGeneratedHashableNodesDeclareDependenciesWithoutWildcardImports() {
+    func testGeneratedHashableNodesDeclareDependenciesWithoutWildcardImports() throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let source = Source(file: Source.FilePath(path: "/virtual/Parity.swift"), content: "value")
         let context = TypeInferenceContext(unavailableAPI: nil, source: source)
         let value = RawExpression(sourceCode: "value")
@@ -115,6 +116,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testOptionalErasureUsesTheActualSerializedSkipLibConstructor() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let producerFile = try tmpFile(named: "Hashable.swift", contents: """
         // SKIP SYMBOLFILE
         public struct AnyHashable {
@@ -138,6 +140,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testAnyHashableCoercionsForInitializerArgumentAssignmentAndReturn() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func accept(_ value: AnyHashable) {}
         func convert(_ value: Int) -> AnyHashable {
@@ -171,6 +174,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testAnyHashableFallbackMapsSkippedDefaultsAndVariadicActualArguments() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func defaulted(prefix: String = "prefix", value: AnyHashable, suffix: Int = 0) {}
         func repeated(_ values: AnyHashable...) {}
@@ -184,6 +188,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testAnyHashableOptionalLiftingAndAlreadyWrappedValues() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func convert(_ value: Int?, _ wrapped: AnyHashable) {
             let result: AnyHashable? = value
@@ -197,6 +202,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testExplicitAnyHashableCastsBoxStaticValuesAndPreserveTypedOptionalErasure() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         typealias Count = Int
         func casts(_ text: String, _ number: Double, _ optional: Count?, _ wrapped: AnyHashable) {
@@ -240,6 +246,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testExplicitNestedOptionalHashableCastKeepsUnsupportedPresenceDiagnostic() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func erase(_ value: Int??) -> AnyHashable { return value as AnyHashable }
         """, expectedError: "cannot preserve nested Optional presence")
@@ -247,6 +254,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testConcreteOptionalErasurePreservesTypedNilAndResolvesAliases() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         typealias Count = Int
         func erase(_ value: Count?) -> AnyHashable { return value }
@@ -256,6 +264,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testNestedOptionalErasureProducesExplicitDiagnostic() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func erase(_ value: Int??) -> AnyHashable { return value }
         """, expectedError: "cannot preserve nested Optional presence")
@@ -263,6 +272,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testGenericOptionalErasureCannotInventAConcreteTypeKey() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func erase<T: Hashable>(_ value: T?) -> AnyHashable { return value }
         """, expectedError: "erased wrapped type of a generic Optional")
@@ -270,6 +280,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testConcreteOuterGenericConstraintUsesActualOptionalTypeKey() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         struct Box<T> {}
         extension Box where T == Int64 {
@@ -281,6 +292,7 @@ final class StandardLibraryParityTests: XCTestCase {
     }
 
     func testAnyHashableArrayAndDictionaryLiteralElementsAreWrapped() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func containers(_ value: Int) {
             let array: [AnyHashable] = [value, 1]

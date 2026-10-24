@@ -17,6 +17,7 @@ final class ContextualHashableConsumerTests: XCTestCase {
     }
 
     func testContextualClosureResultsBoxImplicitAndExplicitReturns() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func accept(_ id: (Int) -> AnyHashable?) {}
         func use() {
@@ -31,6 +32,7 @@ final class ContextualHashableConsumerTests: XCTestCase {
     }
 
     func testDictionaryKeysBoxOnlyForHashableKeyDictionary() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func read(_ erased: [AnyHashable: String], _ strings: [String: String], _ key: String) {
             let first = erased["link"]
@@ -44,6 +46,7 @@ final class ContextualHashableConsumerTests: XCTestCase {
     }
 
     func testFunctionConvertedKeyPathBoxesActualLeaf() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output(#"""
         struct Item { let number: Int; let optional: String? }
         func accept(_ id: (Item) -> AnyHashable?) {}
@@ -64,6 +67,7 @@ final class ContextualHashableConsumerTests: XCTestCase {
     }
 
     func testConditionalCastResultsKeepTheirOptionalPresenceWhenBoxed() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func accept(_ id: (Any) -> AnyHashable?) {}
         func use() {
@@ -77,6 +81,7 @@ final class ContextualHashableConsumerTests: XCTestCase {
     }
 
     func testOptionalCallbackKeyPathRetainsConcreteLeafForHashableConversion() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output(#"""
         func accept(id: ((Int) -> AnyHashable?)? = nil) {}
         func use() { accept(id: \.self) }

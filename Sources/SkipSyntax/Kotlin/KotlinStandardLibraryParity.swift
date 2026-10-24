@@ -332,7 +332,14 @@ enum KotlinStandardLibraryParity {
         }
     }
 
+    /// RNABrowser-fiea.30: AnyHashable boxing is off. SkipLib keeps `AnyHashable` a typealias for
+    /// Hashable (Kotlin `Any`), because runtime collections from JSONSerialization, Kotlin and
+    /// Firestore hold raw keys and a wrapper class made every `[AnyHashable: Any]` read throw. Every
+    /// AnyHashable lowering in this file keys off this predicate, so the 1.9.16 output returns.
+    static let boxesAnyHashable = false
+
     private static func isAnyHashable(_ type: TypeSignature) -> Bool {
+        guard boxesAnyHashable else { return false }
         let resolved = canonicalType(type).withoutOptionality()
         return resolved.isNamed("AnyHashable", moduleName: "Swift", generics: [])
             || resolved.isNamed("AnyHashable", moduleName: "SkipLib", generics: [])

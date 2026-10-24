@@ -53,6 +53,7 @@ final class KnownHashableConstructorMetadataTests: XCTestCase {
     }
 
     func testInferredLocalFromActualGenericHashableConstructorKeepsWrapperType() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await consumer("""
         func use() -> Double? {
             let integer = AnyHashable(Int(7))
@@ -64,6 +65,7 @@ final class KnownHashableConstructorMetadataTests: XCTestCase {
     }
 
     func testDirectActualGenericHashableConstructorKeepsWrapperType() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await consumer("""
         func use() -> Bool? { return AnyHashable(Double(0)) as? Bool }
         """)

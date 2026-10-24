@@ -20,6 +20,7 @@ final class KnownAnyHashableCastTests: XCTestCase {
     }
 
     func testKnownNonoptionalAndOptionalWrappersDoNotCastTheBoxAsItsPayload() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func integer(_ wrapped: AnyHashable) -> Int? { return wrapped as? Int }
         func text(_ optional: AnyHashable?) -> String? { return optional as? String }
@@ -32,6 +33,7 @@ final class KnownAnyHashableCastTests: XCTestCase {
     }
 
     func testKnownWrapperCastEvaluatesItsSideEffectingSourceOnce() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func next() -> AnyHashable? { return AnyHashable(7) }
         func integer() -> Int? { return next() as? Int }
@@ -43,6 +45,7 @@ final class KnownAnyHashableCastTests: XCTestCase {
     }
 
     func testGenericWrappingKeepsConcreteCastAndOrdinaryAnyCastsSeparate() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         struct Token: Hashable { let identifier: Int }
         func erase<T: Hashable>(_ value: T) -> AnyHashable { return AnyHashable(value) }
@@ -58,6 +61,7 @@ final class KnownAnyHashableCastTests: XCTestCase {
     }
 
     func testForcedCastsAndTypeChecksUnboxOnlyKnownPayloadTargets() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func force(_ wrapped: AnyHashable) -> Int { return wrapped as! Int }
         func check(_ optional: AnyHashable?) -> Bool { return optional is Int }
@@ -88,6 +92,7 @@ final class KnownAnyHashableCastTests: XCTestCase {
         XCTAssertFalse(userType.contains("wrapped.base"), userType)
     }
     func testNumericPayloadConversionsUseTheSwiftTargetWithoutReplacingCastOperators() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output("""
         func integer(_ wrapped: AnyHashable) -> Int? { return wrapped as? Int }
         func forced(_ optional: AnyHashable?) -> UInt64 { return optional as! UInt64 }

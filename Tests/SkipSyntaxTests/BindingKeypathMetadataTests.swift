@@ -55,6 +55,7 @@ final class BindingKeypathMetadataTests: XCTestCase {
     }
 
     func testBindingCollectionIDKeypathsKeepTheirOptionalHashableReturnContext() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output(#"""
         import SwiftUI
         struct Entry { let identity: Int? }
@@ -73,6 +74,7 @@ final class BindingKeypathMetadataTests: XCTestCase {
     }
 
     func testBindingCollectionIDKeypathsBoxConcreteLeavesWithoutBoxingPlainCallback() async throws {
+        try XCTSkipUnless(KotlinStandardLibraryParity.boxesAnyHashable, "AnyHashable boxing is off; SkipLib keeps AnyHashable a typealias (RNABrowser-fiea.30)")
         let kotlin = try await output(#"""
         import SwiftUI
         struct Entry { let number: Int }
