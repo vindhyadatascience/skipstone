@@ -167,7 +167,12 @@ final class KotlinStructTransformer: KotlinTransformer {
     }
 
     private func addMemberwiseConstructor(to classDeclaration: KotlinClassDeclaration, variableDeclarations: [KotlinVariableDeclaration], translator: KotlinTranslator) {
-        var minimumVisibility: Modifiers.Visibility = .internal
+        // Start from public, as upstream does: hand-written Kotlin in other Gradle modules
+        // (Skip's own Main.kt template calls SkipUI's `ComposeContext()`) constructs public
+        // structs through this constructor. 1.9.19-vds.2 started from internal, which broke
+        // GeneFox's Android app (RNABrowser-fiea.28). Swift-side access still comes from
+        // CodebaseInfo's synthesized initializer metadata.
+        var minimumVisibility: Modifiers.Visibility = .public
         for variableDeclaration in variableDeclarations {
             if variableDeclaration.modifiers.visibility == .private {
                 minimumVisibility = .private

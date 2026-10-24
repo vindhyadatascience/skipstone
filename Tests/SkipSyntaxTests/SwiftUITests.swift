@@ -1381,7 +1381,7 @@ final class SwiftUITests: XCTestCase {
                 return super.Evaluate(context, options)
             }
 
-            internal constructor(text: String = "") {
+            constructor(text: String = "") {
                 this._text = skip.ui.State(text)
             }
 

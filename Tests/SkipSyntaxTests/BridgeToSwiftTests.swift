@@ -1820,7 +1820,7 @@ final class BridgeToSwiftTests: XCTestCase {
                             didmutate()
                         }
 
-                    internal constructor(b: A.B = B()) {
+                    constructor(b: A.B = B()) {
                         this.b = b
                     }
 
@@ -1908,6 +1908,15 @@ final class BridgeToSwiftTests: XCTestCase {
                 }
                 nonisolated private static let Java_get_b_methodID = Java_class.getMethodID(name: "getB", sig: "()LA$B;")!
                 nonisolated private static let Java_set_b_methodID = Java_class.getMethodID(name: "setB", sig: "(LA$B;)V")!
+
+                public init(b p_0: A.B) {
+                    Java_peer = jniContext {
+                        let p_0_java = p_0.toJavaObject(options: [])!.toJavaParameter(options: [])
+                        let ptr = try! Self.Java_class.create(ctor: Self.Java_constructor_0_methodID, options: [], args: [p_0_java])
+                        return JObject(ptr)
+                    }
+                }
+                nonisolated private static let Java_constructor_0_methodID = Java_class.getMethodID(name: "<init>", sig: "(LA$B;)V")!
             }
         }
         @_cdecl("Java_A_00024B_00024C_Swift_1projectionImpl")
@@ -5578,7 +5587,7 @@ final class BridgeToSwiftTests: XCTestCase {
                 return super.Evaluate(context, options)
             }
 
-            internal constructor(i: Int = 0) {
+            constructor(i: Int = 0) {
                 this._i = skip.ui.State(i)
             }
 
@@ -5625,6 +5634,15 @@ final class BridgeToSwiftTests: XCTestCase {
             }
             nonisolated private static let Java_get_i_methodID = Java_class.getMethodID(name: "getI", sig: "()I")!
             nonisolated private static let Java_set_i_methodID = Java_class.getMethodID(name: "setI", sig: "(I)V")!
+
+            public init(i p_0: Int) {
+                Java_peer = jniContext {
+                    let p_0_java = Int32(p_0).toJavaParameter(options: [])
+                    let ptr = try! Self.Java_class.create(ctor: Self.Java_constructor_0_methodID, options: [], args: [p_0_java])
+                    return JObject(ptr)
+                }
+            }
+            nonisolated private static let Java_constructor_0_methodID = Java_class.getMethodID(name: "<init>", sig: "(I)V")!
         }
         @_cdecl("Java_V_Swift_1projectionImpl")
         public func V_Swift_projectionImpl(_ Java_env: JNIEnvPointer, _ Java_target: JavaObjectPointer, _ options: Int32) -> JavaObjectPointer {

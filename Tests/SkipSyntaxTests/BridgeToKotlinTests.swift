@@ -2199,7 +2199,7 @@ final class BridgeToKotlinTests: XCTestCase {
                         }
                     private external fun Swift_b(Swift_peer: skip.bridge.SwiftObjectPointer): A.B
                     private external fun Swift_b_set(Swift_peer: skip.bridge.SwiftObjectPointer, value: A.B)
-                    internal constructor(b: A.B = B()) {
+                    constructor(b: A.B = B()) {
                         Swift_peer = Swift_constructor_0(b)
                     }
                     private external fun Swift_constructor_0(b: A.B): skip.bridge.SwiftObjectPointer
@@ -4279,7 +4279,7 @@ final class BridgeToKotlinTests: XCTestCase {
             private external fun Swift_i_set(Swift_peer: skip.bridge.SwiftObjectPointer, value: Int)
             fun f(): Int = Swift_f_0(Swift_peer)
             private external fun Swift_f_0(Swift_peer: skip.bridge.SwiftObjectPointer): Int
-            internal constructor(i: Int = 1) {
+            constructor(i: Int = 1) {
                 Swift_peer = Swift_constructor_1(i)
             }
             private external fun Swift_constructor_1(i: Int): skip.bridge.SwiftObjectPointer
@@ -4400,7 +4400,7 @@ final class BridgeToKotlinTests: XCTestCase {
                 return if (islessthan(this, other)) -1 else 1
             }
             private external fun Swift_islessthan(lhs: S, rhs: S): Boolean
-            internal constructor(i: Int = 1) {
+            constructor(i: Int = 1) {
                 Swift_peer = Swift_constructor_0(i)
             }
             private external fun Swift_constructor_0(i: Int): skip.bridge.SwiftObjectPointer
@@ -6902,7 +6902,7 @@ final class BridgeToKotlinTests: XCTestCase {
             override val id: String
                 get() = Swift_id(Swift_peer)
             private external fun Swift_id(Swift_peer: skip.bridge.SwiftObjectPointer): String
-            internal constructor(id: String) {
+            constructor(id: String) {
                 Swift_peer = Swift_constructor_0(id)
             }
             private external fun Swift_constructor_0(id: String): skip.bridge.SwiftObjectPointer
