@@ -197,3 +197,10 @@ whole-app differential transpilation against 1.9.16-vds.1; 1.9.19-vds.2 had not 
 Tags are now SemVer prereleases (`1.9.19-vds.3` here, and `<version>-vds.N` on the
 runtime forks): SwiftPM ignores `+build` metadata, so `+vds.N` tags were not distinct
 versions to it. Consumers pin every fork by exact revision.
+
+## 1.9.19-vds.4 (RNABrowser-fiea.28)
+
+- Explicitly typed closures emitted as Kotlin lambdas (an `@MainActor`/async closure
+  parameter cannot take an anonymous function) wrote their parameter types in Swift
+  spelling (`l@{ _: Bool -> ...`); they now use the Kotlin spelling (`Boolean`, `Long`,
+  `Array<...>`, ...). Found by GeneFox's Mac Pro gate (DestinationClaimTests).

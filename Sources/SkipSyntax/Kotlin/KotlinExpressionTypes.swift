@@ -821,7 +821,9 @@ final class KotlinClosure: KotlinExpression, KotlinMainActorTargeting {
                 }
                 output.append(parameter.internalLabel)
                 if parameter.declaredType != .none {
-                    output.append(": ").append(parameter.declaredType)
+                    // Kotlin spelling: appending the TypeSignature itself writes Swift names
+                    // (`Bool`, `Int64`), which Kotlin cannot resolve (RNABrowser-fiea.28).
+                    output.append(": ").append(parameter.declaredType.kotlin)
                 }
                 if index < parameters.count - 1 {
                     output.append(", ")
