@@ -160,7 +160,20 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
             return
         }
         guard let needsMainActorIsolation = mainActorTargeting.needsMainActorIsolation else {
-            mainActorTargeting.messages.append(.kotlinAsyncAwaitTypeInference(mainActorTargeting, source: source))
+            // An expression nested inside another targeting node (an argument to an awaited
+            // call, say, like a constructor argument evaluated within `await call(...)`) is
+            // not itself the API call the await dispatches: Skip matched (or at least
+            // tolerated) the outer call, and this inner expression merely inherited
+            // `isInAwait` from it (KotlinAwait.setIsAsync marks every nested targeting
+            // node). Warning about it produced spurious diagnostics on correct code
+            // (RNABrowser-fiea.28: `pager: RecordingPager(..., failure: CancellationError())`
+            // warned about the `CancellationError()` argument while the awaited call
+            // matched and generated identical Kotlin to previous releases). Only the
+            // outermost targeting node under its await — the awaited call itself — should
+            // report that it could not be matched.
+            if !isNestedMainActorTargeting(mainActorTargeting) {
+                mainActorTargeting.messages.append(.kotlinAsyncAwaitTypeInference(mainActorTargeting, source: source))
+            }
             return
         }
         guard needsMainActorIsolation else {
@@ -171,6 +184,22 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         if isInMainActorContext(node: mainActorTargeting, codebaseInfo: codebaseInfo) {
             mainActorTargeting.isInMainActorContext = true
         }
+    }
+
+    /// Whether the given node sits inside another main-actor targeting expression before the
+    /// enclosing `await` is reached — i.e. it is not the awaited call itself.
+    private func isNestedMainActorTargeting(_ node: KotlinSyntaxNode) -> Bool {
+        var parent: KotlinSyntaxNode? = node.parent
+        while let contextNode = parent {
+            if contextNode is KotlinAwait {
+                return false
+            }
+            if contextNode is (KotlinSyntaxNode & KotlinMainActorTargeting) {
+                return true
+            }
+            parent = contextNode.parent
+        }
+        return false
     }
 
     private func isInMainActorContext(node: KotlinSyntaxNode, codebaseInfo: CodebaseInfo.Context) -> Bool {

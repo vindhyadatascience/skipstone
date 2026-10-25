@@ -386,6 +386,17 @@ extension Message {
         return Message(kind: .warning, message: "Skip is unable to match this API call to determine whether it results in a View. Consider adding additional type information", sourceDerived: sourceDerived, source: source)
     }
 
+    /// Variant of `kotlinSwiftUITypeInference` that names the argument labels the call used, to
+    /// point at why matching failed — most often an argument list that does not match any known
+    /// overload's declaration order or labels (RNABrowser-fiea.28).
+    static func kotlinSwiftUITypeInference(_ sourceDerived: SourceDerived, argumentLabels: [String], source: Source) -> Message {
+        var message = "Skip is unable to match this API call to determine whether it results in a View. Consider adding additional type information"
+        if !argumentLabels.isEmpty {
+            message += " (argument labels: " + argumentLabels.joined(separator: ", ") + ")"
+        }
+        return Message(kind: .warning, message: message, sourceDerived: sourceDerived, source: source)
+    }
+
     // Idea: duplicate body that we're falling through to (and the following if that too does a fallthrough, etc)
     static func kotlinSwitchFallthrough(_ sourceDerived: SourceDerived, source: Source) -> Message {
         return Message(kind: .error, message: "Kotlin does not support fallthrough. Consider restructuring your switch statement", sourceDerived: sourceDerived, source: source)
