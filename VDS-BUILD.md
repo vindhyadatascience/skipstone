@@ -204,3 +204,14 @@ versions to it. Consumers pin every fork by exact revision.
   parameter cannot take an anonymous function) wrote their parameter types in Swift
   spelling (`l@{ _: Bool -> ...`); they now use the Kotlin spelling (`Boolean`, `Long`,
   `Array<...>`, ...). Found by GeneFox's Mac Pro gate (DestinationClaimTests).
+
+## 1.9.19-vds.5 (RNABrowser-fiea.28)
+
+- The async/await actor-match warning fires only for the awaited expression itself
+  (the target's primary spine: left operand, member base, callee), not for argument
+  constructors or right-hand operands nested in it. Those inherited `isInAwait` and
+  warned spuriously while the awaited call matched and the Kotlin was unchanged.
+- The "unable to match this API call ... View" warning now names the call's argument
+  labels. Its usual cause is an argument list out of declaration order, which drops
+  `.Compose(composectx)` and makes the View vanish on Android.
+- Diagnostics only: generated Kotlin is unchanged from vds.4.
