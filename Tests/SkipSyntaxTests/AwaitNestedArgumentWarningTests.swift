@@ -60,6 +60,19 @@ final class AwaitNestedArgumentWarningTests: XCTestCase {
         XCTAssertTrue(messages.contains { $0.contains(Self.actorWarning) }, messages.joined(separator: "\n"))
     }
 
+    /// Negative control: the awaited call keeps its warning even when Swift's expression-spanning
+    /// `await` makes it the left operand of a comparison inside the awaited expression.
+    func testUnmatchedAwaitedCallInComparisonStillWarns() async throws {
+        let (_, messages) = try await transpile(swift: """
+        struct Box { var value: Int = 0 }
+        func expect(_ condition: Bool) {}
+        func use() async {
+            expect(await Box(nonexistent: 1) == [String]())
+        }
+        """)
+        XCTAssertTrue(messages.contains { $0.contains(Self.actorWarning) }, messages.joined(separator: "\n"))
+    }
+
     /// An operand on the far side of an operator inside an awaited expression — GeneFox's
     /// `#expect(await loader.requestedGenes() == [String]())` — is not the awaited call and
     /// must not warn (HeatmapPipelineBindingTests.swift:268).
