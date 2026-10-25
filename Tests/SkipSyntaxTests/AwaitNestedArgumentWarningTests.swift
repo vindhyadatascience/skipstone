@@ -60,6 +60,21 @@ final class AwaitNestedArgumentWarningTests: XCTestCase {
         XCTAssertTrue(messages.contains { $0.contains(Self.actorWarning) }, messages.joined(separator: "\n"))
     }
 
+    /// An operand on the far side of an operator inside an awaited expression — GeneFox's
+    /// `#expect(await loader.requestedGenes() == [String]())` — is not the awaited call and
+    /// must not warn (HeatmapPipelineBindingTests.swift:268).
+    func testOperatorOperandInAwaitDoesNotWarn() async throws {
+        let (_, messages) = try await transpile(swift: """
+        struct Loader { var genes: [String] = [] }
+        func requestedGenes(_ loader: Loader) async -> [String] { loader.genes }
+        func expect(_ condition: Bool) {}
+        func use(_ loader: Loader) async {
+            expect(await requestedGenes(loader) == [String]())
+        }
+        """)
+        XCTAssertEqual(messages.filter { $0.contains(Self.actorWarning) }, [], messages.joined(separator: "\n"))
+    }
+
     /// The View-kind type-inference warning names the argument labels the unmatched call used,
     /// so the site can be compared against the declaration's parameter order.
     func testViewTypeInferenceWarningNamesArgumentLabels() async throws {
