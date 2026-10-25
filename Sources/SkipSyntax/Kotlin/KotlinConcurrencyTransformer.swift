@@ -160,18 +160,18 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
             return
         }
         guard let needsMainActorIsolation = mainActorTargeting.needsMainActorIsolation else {
-            // An expression nested inside another targeting node (an argument to an awaited
-            // call, say, like a constructor argument evaluated within `await call(...)`) is
-            // not itself the API call the await dispatches: Skip matched (or at least
-            // tolerated) the outer call, and this inner expression merely inherited
-            // `isInAwait` from it (KotlinAwait.setIsAsync marks every nested targeting
-            // node). Warning about it produced spurious diagnostics on correct code
-            // (RNABrowser-fiea.28: `pager: RecordingPager(..., failure: CancellationError())`
-            // warned about the `CancellationError()` argument while the awaited call
-            // matched and generated identical Kotlin to previous releases). Only the
-            // outermost targeting node under its await — the awaited call itself — should
-            // report that it could not be matched.
-            if !isNestedMainActorTargeting(mainActorTargeting) {
+            // An expression nested inside the awaited expression (an argument constructor, or
+            // an operand on the far side of an operator, as in
+            // `#expect(await fetch() == [String]())`) is not itself the API call the await
+            // dispatches: Skip matched (or at least tolerated) the awaited call, and this
+            // inner expression merely inherited `isInAwait` from it (KotlinAwait.setIsAsync
+            // marks every nested targeting node). Warning about it produced spurious
+            // diagnostics on correct code (RNABrowser-fiea.28: `pager:
+            // RecordingPager(..., failure: CancellationError())` warned about the
+            // `CancellationError()` argument while the awaited call matched and generated
+            // identical Kotlin to previous releases). Only the awaited expression itself
+            // reports that it could not be matched.
+            if isAwaitTargetExpression(mainActorTargeting) {
                 mainActorTargeting.messages.append(.kotlinAsyncAwaitTypeInference(mainActorTargeting, source: source))
             }
             return
@@ -186,20 +186,43 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         }
     }
 
-    /// Whether the given node sits inside another main-actor targeting expression before the
-    /// enclosing `await` is reached — i.e. it is not the awaited call itself.
-    private func isNestedMainActorTargeting(_ node: KotlinSyntaxNode) -> Bool {
+    /// Whether the given node is the root of its enclosing `await`'s target expression — i.e.
+    /// the awaited call itself, not an argument or operand evaluated inside it.
+    ///
+    /// `KotlinAwait.setIsAsync` marks every nested main-actor targeting node `isInAwait`, but
+    /// only the awaited expression itself is the call whose actor Skip must determine. An
+    /// argument constructor (`await call(..., failure: CancellationError())`) or an operand on
+    /// the other side of an operator (`await loader.fetch() == [String]()`) is not dispatched
+    /// on its own, so it must not warn when it fails to match.
+    private func isAwaitTargetExpression(_ node: KotlinSyntaxNode) -> Bool {
         var parent: KotlinSyntaxNode? = node.parent
+        var awaitNode: KotlinAwait?
         while let contextNode = parent {
-            if contextNode is KotlinAwait {
-                return false
-            }
-            if contextNode is (KotlinSyntaxNode & KotlinMainActorTargeting) {
-                return true
+            if let kotlinAwait = contextNode as? KotlinAwait {
+                awaitNode = kotlinAwait
+                break
             }
             parent = contextNode.parent
         }
-        return false
+        guard let awaitNode else {
+            // Not under an await in this tree (isInAwait may have been set before the node was
+            // relocated); keep the previous behavior for these.
+            return true
+        }
+        var target = awaitNode.target as KotlinSyntaxNode
+        while true {
+            // Transparent wrappers around the awaited expression
+            if let parenthesized = target as? KotlinParenthesized {
+                target = parenthesized.content
+            } else if let sref = target as? KotlinSRef {
+                target = sref.base
+            } else if let shared = target as? KotlinSharedExpressionPointer {
+                target = shared.shared
+            } else {
+                break
+            }
+        }
+        return target === node
     }
 
     private func isInMainActorContext(node: KotlinSyntaxNode, codebaseInfo: CodebaseInfo.Context) -> Bool {
