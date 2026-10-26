@@ -102,7 +102,7 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
 
     private func updateTaskConstructor(functionCall: KotlinFunctionCall, closure: KotlinClosure, codebaseInfo: CodebaseInfo.Context?) {
         // The Task will launch a coroutine with the correct dispatcher based on the main actor argument we insert
-        let isMainActorClosure = closure.apiFlags?.options.contains(.mainActor) == true || (codebaseInfo != nil && isInMainActorContext(node: functionCall, codebaseInfo: codebaseInfo!))
+        let isMainActorClosure = closure.apiFlags?.options.contains(.mainActor) == true || (codebaseInfo != nil && isInMainActorContext(node: functionCall, codebaseInfo: codebaseInfo!, inferViewIsolation: true))
         if isMainActorClosure {
             closure.apiFlags?.options.insert(.mainActor)
             functionCall.arguments.insert(LabeledValue(label: "isMainActor", value: KotlinBooleanLiteral(literal: true)), at: 0)
@@ -242,7 +242,7 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         return false
     }
 
-    private func isInMainActorContext(node: KotlinSyntaxNode, codebaseInfo: CodebaseInfo.Context) -> Bool {
+    private func isInMainActorContext(node: KotlinSyntaxNode, codebaseInfo: CodebaseInfo.Context, inferViewIsolation: Bool = false) -> Bool {
         // Traverse up from the given node to determine if it is in a main actor context
         var contextNode: KotlinSyntaxNode? = node
         repeat {
@@ -251,7 +251,19 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
                 break
             }
             if let functionDeclaration = contextNode as? KotlinFunctionDeclaration {
-                return functionDeclaration.apiFlags.options.contains(.mainActor) || KotlinSwiftUITransformer.viewModifierForBody(functionDeclaration, codebaseInfo: codebaseInfo) != nil
+                // Synchronous members may inherit isolation from their type or protocol
+                // without carrying a MainActor attribute on the declaration itself.
+                // A nonisolated member is an explicit boundary, including inside a View.
+                guard !functionDeclaration.modifiers.isNonisolated else {
+                    return false
+                }
+                // SkipUI's compatibility metadata marks only body, while SwiftUI
+                // isolates the View type. Task creation must inherit that isolation
+                // from ordinary View methods too, without changing other call emission.
+                if inferViewIsolation, let view = KotlinSwiftUITransformer.viewForMember(functionDeclaration, codebaseInfo: codebaseInfo), !view.modifiers.isNonisolated {
+                    return true
+                }
+                return codebaseInfo.isMainActor(declaration: functionDeclaration) || KotlinSwiftUITransformer.viewModifierForBody(functionDeclaration, codebaseInfo: codebaseInfo) != nil
             } else if let variableDeclaration = contextNode as? KotlinVariableDeclaration {
                 return variableDeclaration.apiFlags.options.contains(.mainActor) || KotlinSwiftUITransformer.viewForBody(variableDeclaration, codebaseInfo: codebaseInfo) != nil
             } else if let closure = contextNode as? KotlinClosure, closure.apiFlags?.options.contains(.async) == true {

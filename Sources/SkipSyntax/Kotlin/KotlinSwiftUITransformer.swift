@@ -79,6 +79,14 @@ final class KotlinSwiftUITransformer: KotlinTransformer {
         return classDeclaration
     }
 
+    /// If the given function belongs to a SwiftUI View, return its owning View.
+    static func viewForMember(_ functionDeclaration: KotlinFunctionDeclaration, codebaseInfo: CodebaseInfo.Context?) -> KotlinClassDeclaration? {
+        guard functionDeclaration.role == .member, let classDeclaration = functionDeclaration.parent as? KotlinClassDeclaration else {
+            return nil
+        }
+        return isSwiftUIType(named: "View", declaration: classDeclaration, type: classDeclaration.signature, codebaseInfo: codebaseInfo) ? classDeclaration : nil
+    }
+
     /// If the given function is the `body` of a `ViewModifier`, return the parent view modifier.
     static func viewModifierForBody(_ functionDeclaration: KotlinFunctionDeclaration, codebaseInfo: CodebaseInfo.Context?) -> KotlinClassDeclaration? {
         guard functionDeclaration.role == .member, functionDeclaration.name == "body", functionDeclaration.parameters.count == 1, functionDeclaration.parameters[0].externalLabel == "content", !functionDeclaration.isStatic, let classDeclaration = functionDeclaration.parent as? KotlinClassDeclaration else {
