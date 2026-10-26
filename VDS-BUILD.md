@@ -215,3 +215,12 @@ versions to it. Consumers pin every fork by exact revision.
   labels. Its usual cause is an argument list out of declaration order, which drops
   `.Compose(composectx)` and makes the View vanish on Android.
 - Diagnostics only: generated Kotlin is unchanged from vds.4.
+
+## 1.9.19-vds.6 (RNABrowser-fz7x)
+
+- `Task {}` inherits `@MainActor` isolation from its enclosing context, as Swift does:
+  a Task constructed in a `@MainActor` type or member (including a SwiftUI View's
+  `body`) now launches on Main. `nonisolated` members, `Task.detached`, and ordinary or
+  unrelated contexts are unchanged. Generated Kotlin changes for MainActor-enclosed Tasks.
+- Fork-wide tag scheme: every fork (skipstone, skip, skip-lib, skip-foundation, skip-ui)
+  now tags releases `<upstream>-vds.N`, never `+vds.N` (SwiftPM ignores build metadata).
