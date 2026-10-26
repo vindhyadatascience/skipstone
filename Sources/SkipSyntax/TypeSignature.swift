@@ -1517,6 +1517,15 @@ indirect enum TypeSignature: CustomStringConvertible, Hashable, Codable {
                 }
                 return (2.0 + elementScore) / 2.0
             }
+            // `a...b` is typed `.range`, but APIs spell their bounds `ClosedRange<Bound>` (SkipUI's
+            // `Stepper(value:in:step:label:)`, `Slider(value:in:)`). Without this the call matched
+            // nothing and its trailing closure lost the `label =` it needs in Kotlin.
+            if case .named(let name, let generics) = strippedTarget, name == "ClosedRange", generics.count == 1 {
+                guard let elementScore = (element ?? .none).compatibilityScore(target: generics[0], codebaseInfo: codebaseInfo) else {
+                    return nil
+                }
+                return (1.9 + elementScore) / 2.0
+            }
         case .set(let element):
             if case .set(let targetElement) = strippedTarget {
                 guard let elementScore = (element ?? .none).compatibilityScore(target: targetElement ?? .none, codebaseInfo: codebaseInfo) else {

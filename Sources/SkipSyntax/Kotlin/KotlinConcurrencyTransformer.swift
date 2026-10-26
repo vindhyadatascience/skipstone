@@ -160,7 +160,20 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
             return
         }
         guard let needsMainActorIsolation = mainActorTargeting.needsMainActorIsolation else {
-            mainActorTargeting.messages.append(.kotlinAsyncAwaitTypeInference(mainActorTargeting, source: source))
+            // An expression nested inside the awaited expression (an argument constructor, or
+            // an operand on the far side of an operator, as in
+            // `#expect(await fetch() == [String]())`) is not itself the API call the await
+            // dispatches: Skip matched (or at least tolerated) the awaited call, and this
+            // inner expression merely inherited `isInAwait` from it (KotlinAwait.setIsAsync
+            // marks every nested targeting node). Warning about it produced spurious
+            // diagnostics on correct code (RNABrowser-fiea.28: `pager:
+            // RecordingPager(..., failure: CancellationError())` warned about the
+            // `CancellationError()` argument while the awaited call matched and generated
+            // identical Kotlin to previous releases). Only the awaited expression itself
+            // reports that it could not be matched.
+            if isAwaitTargetExpression(mainActorTargeting) {
+                mainActorTargeting.messages.append(.kotlinAsyncAwaitTypeInference(mainActorTargeting, source: source))
+            }
             return
         }
         guard needsMainActorIsolation else {
@@ -171,6 +184,62 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         if isInMainActorContext(node: mainActorTargeting, codebaseInfo: codebaseInfo) {
             mainActorTargeting.isInMainActorContext = true
         }
+    }
+
+    /// Whether the given node is the awaited expression itself — the root of its enclosing
+    /// `await`'s target or a call on that target's primary spine — rather than an argument or
+    /// operand evaluated inside it.
+    ///
+    /// `KotlinAwait.setIsAsync` marks every nested main-actor targeting node `isInAwait`, but
+    /// only the awaited call is the API whose actor Skip must determine. An argument
+    /// constructor (`await call(..., failure: CancellationError())`) or an operand on the
+    /// other side of an operator (`await loader.fetch() == [String]()`) is not dispatched on
+    /// its own, so it must not warn when it fails to match. Swift's `await` spans the whole
+    /// following expression, though, so for a compound target the awaited call is the target's
+    /// leftmost spine — the binary operator's left operand, a member access's base, a call's
+    /// callee — and a node there is still the awaited call and keeps its warning.
+    private func isAwaitTargetExpression(_ node: KotlinSyntaxNode) -> Bool {
+        var parent: KotlinSyntaxNode? = node.parent
+        var awaitNode: KotlinAwait?
+        while let contextNode = parent {
+            if let kotlinAwait = contextNode as? KotlinAwait {
+                awaitNode = kotlinAwait
+                break
+            }
+            parent = contextNode.parent
+        }
+        guard let awaitNode else {
+            // Not under an await in this tree (isInAwait may have been set before the node was
+            // relocated); keep the previous behavior for these.
+            return true
+        }
+        var current = awaitNode.target as KotlinSyntaxNode
+        var visited: Set<ObjectIdentifier> = []
+        while visited.insert(ObjectIdentifier(current)).inserted {
+            if current === node {
+                return true
+            }
+            // Transparent wrappers around the awaited expression
+            if let parenthesized = current as? KotlinParenthesized {
+                current = parenthesized.content
+            } else if let sref = current as? KotlinSRef {
+                current = sref.base
+            } else if let shared = current as? KotlinSharedExpressionPointer {
+                current = shared.shared
+            } else if let binaryOperator = current as? KotlinBinaryOperator {
+                current = binaryOperator.lhs
+            } else if let memberAccess = current as? KotlinMemberAccess {
+                guard let base = memberAccess.base else { break }
+                current = base
+            } else if let subscriptExpression = current as? KotlinSubscript {
+                current = subscriptExpression.base
+            } else if let functionCall = current as? KotlinFunctionCall {
+                current = functionCall.function
+            } else {
+                break
+            }
+        }
+        return false
     }
 
     private func isInMainActorContext(node: KotlinSyntaxNode, codebaseInfo: CodebaseInfo.Context) -> Bool {

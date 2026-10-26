@@ -714,7 +714,16 @@ private final class TranslateVisitor {
                             updateTableColumnFunctionCallParameters(in: node)
                         }
                     } else {
-                        node.messages.append(.kotlinSwiftUITypeInference(node, source: translator.syntaxTree.source))
+                        // Name the argument labels the unmatched call used, so the site can be
+                        // identified and its argument list compared against the declaration's
+                        // order (a mismatch there is the usual cause — RNABrowser-fiea.28).
+                        let argumentLabels: [String]
+                        if let functionCall = node as? KotlinFunctionCall {
+                            argumentLabels = functionCall.arguments.compactMap { $0.label }
+                        } else {
+                            argumentLabels = []
+                        }
+                        node.messages.append(.kotlinSwiftUITypeInference(node, argumentLabels: argumentLabels, source: translator.syntaxTree.source))
                     }
                     return .skip
                 } else {
