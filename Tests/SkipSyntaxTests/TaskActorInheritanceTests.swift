@@ -241,4 +241,16 @@ final class TaskActorInheritanceTests: XCTestCase {
         XCTAssertEqual(lines, ["Task(isMainActor = true) { -> print(\"initializer-assignment\") }", "Task(isMainActor = true) { -> print(\"method-assignment\") }", "Task(isMainActor = true) { -> print(\"computed-property\") }"])
     }
 
+    func testPropertyObserversInheritThePropertyActor() async throws {
+        let lines = try await taskLines("""
+        class Observer {
+            @MainActor var value = 0 {
+                willSet { Task { print("will-set") } }
+                didSet { Task { print("did-set") } }
+            }
+        }
+        """)
+        XCTAssertEqual(lines, ["Task(isMainActor = true) { -> print(\"will-set\") }", "Task(isMainActor = true) { -> print(\"did-set\") }"])
+    }
+
 }

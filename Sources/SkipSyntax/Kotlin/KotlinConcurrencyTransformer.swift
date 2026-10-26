@@ -246,6 +246,7 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         // Traverse up from the given node to determine if it is in a main actor context
         var contextNode: KotlinSyntaxNode? = node
         repeat {
+            let childNode = contextNode
             contextNode = contextNode?.parent
             guard let contextNode else {
                 break
@@ -273,8 +274,9 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
                     continue
                 }
                 // Stored-value initializers (including lazy ones) do not inherit
-                // their property's actor. Accessor bodies do, as Swift's compiler verifies.
-                if variableDeclaration.role.isProperty && !variableDeclaration.apiFlags.options.contains(.computed) {
+                // their property's actor. Accessors and observers do, so distinguish
+                // the initializer expression from those bodies rather than the storage kind.
+                if variableDeclaration.role.isProperty && (variableDeclaration.value === childNode || variableDeclaration.constructionValue === childNode) {
                     return false
                 }
                 if inferViewIsolation, let view = KotlinSwiftUITransformer.viewForMember(variableDeclaration, codebaseInfo: codebaseInfo), !view.modifiers.isNonisolated {
