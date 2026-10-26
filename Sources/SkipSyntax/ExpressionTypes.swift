@@ -550,6 +550,7 @@ final class Closure: Expression {
     private(set) var parameters: [Parameter<Void>]
     private(set) var throwsType: TypeSignature
     private(set) var attributes: Attributes
+    private(set) var isSendable = false
     let isAsync: Bool
     let body: CodeBlock
     var apiFlags: APIFlags {
@@ -614,6 +615,9 @@ final class Closure: Expression {
     }
 
     override func inferTypes(context: TypeInferenceContext, expecting: TypeSignature) -> TypeInferenceContext {
+        // Function type merging retains explicit attributes, so preserve contextual
+        // Sendable separately for actor-inheritance boundaries.
+        isSendable = attributes.contains(.sendable) || expecting.additionalAttributes?.contains(.sendable) == true
         captureList.forEach { $0.1.value.inferTypes(context: context, expecting: .none) }
         let parameterSignatures: [TypeSignature.Parameter]
         if parameters.isEmpty {

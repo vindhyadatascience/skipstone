@@ -115,7 +115,7 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         guard let codebaseInfo else {
             return
         }
-        guard closure.apiFlags?.options.contains(.async) == true && closure.apiFlags?.options.contains(.mainActor) != true else {
+        guard closure.apiFlags?.options.contains(.async) == true && closure.apiFlags?.options.contains(.mainActor) != true && !closure.isSendable else {
             return
         }
 
@@ -265,9 +265,31 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
                 }
                 return codebaseInfo.isMainActor(declaration: functionDeclaration) || KotlinSwiftUITransformer.viewModifierForBody(functionDeclaration, codebaseInfo: codebaseInfo) != nil
             } else if let variableDeclaration = contextNode as? KotlinVariableDeclaration {
-                return variableDeclaration.apiFlags.options.contains(.mainActor) || KotlinSwiftUITransformer.viewForBody(variableDeclaration, codebaseInfo: codebaseInfo) != nil
-            } else if let closure = contextNode as? KotlinClosure, closure.apiFlags?.options.contains(.async) == true {
-                return closure.apiFlags?.options.contains(.mainActor) == true
+                guard !variableDeclaration.modifiers.isNonisolated else {
+                    return false
+                }
+                if variableDeclaration.role == .local {
+                    // A let/var holding the Task is not a new isolation context.
+                    continue
+                }
+                // Stored-value initializers (including lazy ones) do not inherit
+                // their property's actor. Accessor bodies do, as Swift's compiler verifies.
+                if variableDeclaration.role.isProperty && !variableDeclaration.apiFlags.options.contains(.computed) {
+                    return false
+                }
+                if inferViewIsolation, let view = KotlinSwiftUITransformer.viewForMember(variableDeclaration, codebaseInfo: codebaseInfo), !view.modifiers.isNonisolated {
+                    return true
+                }
+                return codebaseInfo.isMainActor(declaration: variableDeclaration) || KotlinSwiftUITransformer.viewForBody(variableDeclaration, codebaseInfo: codebaseInfo) != nil
+            } else if let closure = contextNode as? KotlinClosure {
+                if closure.apiFlags?.options.contains(.mainActor) == true {
+                    return true
+                }
+                // Ordinary synchronous callbacks inherit the lexical context, but a
+                // nonisolated Sendable closure and a detached/other async closure do not.
+                if closure.isSendable || closure.apiFlags?.options.contains(.async) == true {
+                    return false
+                }
             }
         } while true
         return false
@@ -294,7 +316,8 @@ extension CodebaseInfo.Context {
         let arguments = declaration.parameters.map { LabeledValue(label: $0.externalLabel, value: ArgumentValue(type: $0.declaredType)) }
         let matches: [APIMatch]
         if let owningType = owningType(of: declaration) {
-            matches = matchFunction(name: declaration.name, inConstrained: owningType, arguments: arguments)
+            let name = declaration.type == .constructorDeclaration ? nil : declaration.name
+            matches = matchFunction(name: name, inConstrained: owningType, arguments: arguments)
         } else {
             matches = matchFunction(name: declaration.name, arguments: arguments)
         }

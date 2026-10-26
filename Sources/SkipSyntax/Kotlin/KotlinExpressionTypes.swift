@@ -623,6 +623,9 @@ struct KotlinCasePattern {
 final class KotlinClosure: KotlinExpression, KotlinMainActorTargeting {
     static let returnLabel = "l"
 
+    /// Preserve Sendable context for lexical actor-inheritance boundaries.
+    var isSendable = false
+
     var labeledCaptureList: [LabeledValue<KotlinExpression>] = []
     var returnType: TypeSignature = .none
     var parameters: [Parameter<Void>] = []
@@ -714,6 +717,7 @@ final class KotlinClosure: KotlinExpression, KotlinMainActorTargeting {
         kexpression.isDestructuredParameters = expression.isDestructuredParameters
         kexpression.implicitParameterCount = implicitParameterCount
         kexpression.attributes = expression.attributes
+        kexpression.isSendable = expression.isSendable
         // Combine inferred flags because most closures aren't declared with explicit info
         kexpression.apiFlags = effectiveFlags
         kexpression.isAnonymousFunction = isAnonymousFunction
