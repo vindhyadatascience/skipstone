@@ -4,7 +4,7 @@ import XCTest
 @testable import SkipSyntax
 
 final class TaskActorInheritanceTests: XCTestCase {
-    private func taskLines(_ swift: String) async throws -> [String] {
+    private func outputLines(_ swift: String) async throws -> [String] {
         let source = try tmpFile(named: "Source.swift", contents: swift)
         let support = try tmpFile(named: "Support.swift", contents: """
         import SwiftUI
@@ -30,13 +30,16 @@ final class TaskActorInheritanceTests: XCTestCase {
             if result.input.file == files[0] { output += result.output.content }
         }
         return output.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-            .compactMap { line in
-                // Include constructors in declarations and assignments, not just statements.
-                for prefix in ["Task(", "Task {", "Task.detached"] {
-                    if let range = line.range(of: prefix) { return String(line[range.lowerBound...]) }
-                }
-                return nil
+    }
+
+    private func taskLines(_ swift: String) async throws -> [String] {
+        return try await outputLines(swift).compactMap { line in
+            // Include constructors in declarations and assignments, not just statements.
+            for prefix in ["Task(", "Task {", "Task.detached"] {
+                if let range = line.range(of: prefix) { return String(line[range.lowerBound...]) }
             }
+            return nil
+        }
     }
 
     func testSynchronousMethodInMainActorType() async throws {
@@ -251,6 +254,56 @@ final class TaskActorInheritanceTests: XCTestCase {
         }
         """)
         XCTAssertEqual(lines, ["Task(isMainActor = true) { -> print(\"will-set\") }", "Task(isMainActor = true) { -> print(\"did-set\") }"])
+    }
+
+    func testSyncMainActorCallbackInsideSendableAsyncClosureStaysPlain() async throws {
+        // RNABrowser vds.8: ptt6 correctly stopped a Sendable async closure from inheriting
+        // MainActor, which exposed the sync @MainActor trailing closure inside its await. That
+        // callback is a plain Kotlin lambda, so it must not wrap its body in MainActor.run.
+        let lines = try await outputLines("""
+        struct Publication {}
+        final class Grouping: @unchecked Sendable {
+            var onSubtypes: (@Sendable () async -> Void)? = nil
+        }
+        @MainActor final class Probe {
+            func publish(_ publication: Publication) {}
+            func cancelWorker() {}
+        }
+        @MainActor final class Session {
+            func load(projectID: String, publish: @MainActor (Publication) -> Void) async {}
+        }
+        @MainActor func runSync(_ body: @MainActor () -> Void) async {}
+        @MainActor func runAsync(_ body: @MainActor () async -> Void) async {}
+        @MainActor struct MainTests {
+            func superseded() async {
+                let session = Session()
+                let grouping = Grouping()
+                let probe = Probe()
+                grouping.onSubtypes = {
+                    await session.load(projectID: "A") { probe.publish($0) }
+                    await probe.cancelWorker()
+                }
+            }
+        }
+        struct PlainTests {
+            func superseded(session: Session, grouping: Grouping, probe: Probe) async {
+                grouping.onSubtypes = {
+                    await session.load(projectID: "A") { probe.publish($0) }
+                }
+                await runSync { probe.publish(Publication()) }
+                await runAsync { probe.publish(Publication()) }
+            }
+        }
+        """)
+        let output = lines.joined(separator: "\n")
+        // The Sendable async closure stays a suspend lambda that does not inherit MainActor.
+        XCTAssertEqual(lines.filter { $0.hasPrefix("grouping.onSubtypes = ") }, ["grouping.onSubtypes = { -> Async.run {", "grouping.onSubtypes = { -> Async.run {"], output)
+        // The sync @MainActor callbacks are plain lambdas, never wrapped in suspend MainActor.run.
+        XCTAssertEqual(lines.filter { $0.hasPrefix("session.load(") }, ["session.load(projectID = \"A\") { it -> probe.publish(it) }", "session.load(projectID = \"A\") { it -> probe.publish(it) }"], output)
+        XCTAssertTrue(lines.contains("probe.mainactor { it.cancelWorker() }"), output)
+        XCTAssertTrue(lines.contains("runSync { -> probe.publish(Publication()) }"), output)
+        // An async @MainActor callback is a suspend lambda and still dispatches itself.
+        XCTAssertTrue(lines.contains("runAsync { -> MainActor.run { probe.publish(Publication()) } }"), output)
     }
 
 }

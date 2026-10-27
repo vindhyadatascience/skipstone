@@ -181,6 +181,17 @@ final class KotlinConcurrencyTransformer: KotlinTransformer {
         }
 
         var mainActorTargeting = mainActorTargeting
+        // A synchronous @MainActor closure is invoked synchronously by a callee already on the
+        // main actor, so its body is in main-actor context by its type. It also becomes a plain
+        // (non-suspend) Kotlin lambda, which cannot dispatch itself with MainActor.run. Do not
+        // derive its isolation from the lexical walk: that walk stops at an enclosing
+        // nonisolated Sendable async closure (RNABrowser-ptt6), and wrapping the sync body in
+        // MainActor.run then fails Kotlin with "Suspension functions can only be called within
+        // coroutine body".
+        if let closure = mainActorTargeting as? KotlinClosure, closure.apiFlags?.options.contains(.async) != true {
+            mainActorTargeting.isInMainActorContext = true
+            return
+        }
         if isInMainActorContext(node: mainActorTargeting, codebaseInfo: codebaseInfo) {
             mainActorTargeting.isInMainActorContext = true
         }
