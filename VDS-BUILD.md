@@ -224,3 +224,12 @@ versions to it. Consumers pin every fork by exact revision.
   unrelated contexts are unchanged. Generated Kotlin changes for MainActor-enclosed Tasks.
 - Fork-wide tag scheme: every fork (skipstone, skip, skip-lib, skip-foundation, skip-ui)
   now tags releases `<upstream>-vds.N`, never `+vds.N` (SwiftPM ignores build metadata).
+
+## 1.9.19-vds.7 (RNABrowser-ptt6)
+
+- `Task {}` inherits the enclosing actor through more of the contexts Swift recognises:
+  local assignments and bindings (inheritance continues past them), constructors and
+  computed members, and callback closures. Stored-property initializers do not inherit
+  the property's actor, while isolated `willSet`/`didSet` observers do, matching the
+  Swift compiler. `Task.detached`, explicit-actor callbacks, Sendable boundaries and
+  `nonisolated` code are unchanged. Generated Kotlin changes for the newly covered Tasks.
