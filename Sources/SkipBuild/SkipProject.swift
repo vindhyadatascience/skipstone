@@ -3585,7 +3585,7 @@ extension FrameworkProjectLayout {
 
         kotlin {
             compilerOptions {
-                jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(libs.versions.jvm.get().toString())
+                jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(libs.versions.jvm.get())
             }
         }
 
