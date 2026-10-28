@@ -233,3 +233,11 @@ versions to it. Consumers pin every fork by exact revision.
   the property's actor, while isolated `willSet`/`didSet` observers do, matching the
   Swift compiler. `Task.detached`, explicit-actor callbacks, Sendable boundaries and
   `nonisolated` code are unchanged. Generated Kotlin changes for the newly covered Tasks.
+
+## 1.9.19-vds.8 (RNABrowser-vds.8)
+
+- Synchronous `@MainActor` callbacks stay plain calls inside `@Sendable` async closures
+  (stored closure properties included), instead of being suspended; matches Swift.
+- Generated Gradle files build without Kotlin warnings: `JvmTarget.fromTarget` takes the
+  version string directly, and plugin tasks use `tasks.register(...)` instead of the deprecated
+  `task(...)`.
