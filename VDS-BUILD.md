@@ -241,3 +241,11 @@ versions to it. Consumers pin every fork by exact revision.
 - Generated Gradle files build without Kotlin warnings: `JvmTarget.fromTarget` takes the
   version string directly, and plugin tasks use `tasks.register(...)` instead of the deprecated
   `task(...)`.
+
+## 1.9.19-vds.9 (RNABrowser-vo64)
+
+- A Swift `continue` inside a `switch` case continues the enclosing loop. A switch whose cases
+  contain `break` becomes a Kotlin `when` inside a one-pass loop; an unlabeled `continue` there
+  only left that wrapper and ran the rest of the enclosing loop body. The enclosing loop now
+  labels itself `skipcontinue@` (or keeps its Swift label) and those continues name it.
+  Generated Kotlin changes only for loops holding such a continue.
