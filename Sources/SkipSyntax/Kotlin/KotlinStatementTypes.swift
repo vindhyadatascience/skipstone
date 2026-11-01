@@ -557,6 +557,66 @@ final class KotlinCodeBlock: KotlinStatement, KotlinSingleStatementAppendable {
     }
 }
 
+/// A Kotlin loop translated from a Swift loop.
+///
+/// Kotlin cannot `break` out of a `when`, so a Swift `switch` whose cases contain `break` becomes a `when` inside a
+/// one-pass loop (see `KotlinWhen.hasBreakLoop`). An unlabeled Kotlin `continue` in such a case would target that
+/// one-pass loop and fall through to the rest of the enclosing loop's body, where Swift continues the enclosing loop.
+/// The enclosing loop therefore labels itself and those continues name it.
+protocol KotlinLoop: KotlinStatement {
+    var jumpLabel: String? { get set }
+    var body: KotlinCodeBlock { get }
+}
+
+extension KotlinLoop {
+    /// The label a loop gives itself for continues inside switch loops, reserved like other generated names.
+    /// Nested loops reuse it: a labelled Kotlin jump targets the innermost loop with that label, and only the
+    /// innermost loop of a `continue` labels itself for it, as Swift's unlabeled `continue` targets that loop.
+    static var switchLoopContinueLabel: String { "skipcontinue" }
+
+    /// Label this loop if its body has an unlabeled `continue` inside a `when` that is wrapped in a one-pass loop.
+    func labelContinuesThroughSwitchLoops() {
+        var switchLoopDepth = 0
+        var continues: [KotlinContinue] = []
+        body.visit { node in
+            if node is KotlinForLoop || node is KotlinWhileLoop {
+                // Unlabeled continues in nested loops target those loops
+                return .skip
+            } else if let when = node as? KotlinWhen, when.hasBreakLoop {
+                switchLoopDepth += 1
+                return .recurse { _ in switchLoopDepth -= 1 }
+            } else if let kcontinue = node as? KotlinContinue, kcontinue.label == nil, switchLoopDepth > 0 {
+                continues.append(kcontinue)
+            }
+            return .recurse(nil)
+        }
+        guard !continues.isEmpty else {
+            return
+        }
+        let label = Self.switchLoopContinueLabel
+        continues.forEach { $0.label = label }
+        jumpLabel = label
+    }
+
+    /// Point the jumps this loop labelled at a different label.
+    func relabelJumps(from label: String, to newLabel: String) {
+        body.visit { node in
+            if node is KotlinForLoop || node is KotlinWhileLoop {
+                return .skip
+            } else if let kcontinue = node as? KotlinContinue, kcontinue.label == label {
+                kcontinue.label = newLabel
+            }
+            return .recurse(nil)
+        }
+    }
+
+    func appendJumpLabel(to output: OutputGenerator) {
+        if let jumpLabel {
+            output.append(jumpLabel).append("@ ")
+        }
+    }
+}
+
 final class KotlinContinue: KotlinStatement {
     var label: String?
 
@@ -609,7 +669,8 @@ final class KotlinEmpty: KotlinStatement, KotlinMemberDeclaration {
     var attributes = Attributes()
 }
 
-final class KotlinForLoop: KotlinStatement {
+final class KotlinForLoop: KotlinStatement, KotlinLoop {
+    var jumpLabel: String?
     var identifierPatterns: [IdentifierPattern]
     var declaredType: TypeSignature = .none
     var sequence: KotlinExpression
@@ -624,6 +685,7 @@ final class KotlinForLoop: KotlinStatement {
         }
         let kbody = KotlinCodeBlock.translate(statement: statement.body, translator: translator)
         let kstatement = KotlinForLoop(statement: statement, sequence: ksequence, body: kbody)
+        kstatement.labelContinuesThroughSwitchLoops()
         kstatement.declaredType = statement.declaredType.resolvingSelf(in: statement)
         kstatement.isNonNilMatch = statement.isNonNilMatch
         if let whereGuard = statement.whereGuard {
@@ -649,7 +711,9 @@ final class KotlinForLoop: KotlinStatement {
     }
 
     override func append(to output: OutputGenerator, indentation: Indentation) {
-        output.append(indentation).append("for (")
+        output.append(indentation)
+        appendJumpLabel(to: output)
+        output.append("for (")
         // Append _0 to any vars so that we can re-declare them with their original names in the loop body
         let identifierNames = identifierPatterns.map {
             return $0.name != nil && $0.isVar ? "\($0.name!)_0" : $0.name
@@ -706,6 +770,11 @@ final class KotlinLabeledStatement: KotlinStatement {
 
     static func translate(statement: LabeledStatement, translator: KotlinTranslator) -> KotlinLabeledStatement {
         let ktarget = translator.translateStatement(statement.target).first ?? KotlinMessageStatement(message: .kotlinUntranslatable(statement, source: translator.syntaxTree.source), statement: statement)
+        // A loop that labelled itself for continues inside switch loops uses the Swift label instead
+        if let loop = ktarget as? KotlinLoop, let jumpLabel = loop.jumpLabel {
+            loop.relabelJumps(from: jumpLabel, to: statement.label)
+            loop.jumpLabel = nil
+        }
         return KotlinLabeledStatement(statement: statement, target: ktarget)
     }
 
@@ -903,7 +972,8 @@ final class KotlinTryCatch: KotlinStatement {
     }
 }
 
-final class KotlinWhileLoop: KotlinStatement {
+final class KotlinWhileLoop: KotlinStatement, KotlinLoop {
+    var jumpLabel: String?
     var conditions: [KotlinExpression]
     var caseBindingVariables: [KotlinBindingVariable]
     var guardStatement: KotlinStatement?
@@ -920,6 +990,7 @@ final class KotlinWhileLoop: KotlinStatement {
             kstatement = KotlinWhileLoop(statement: statement, guardStatement: guardStatement, body: kbody)
         }
         kstatement.isDoWhile = statement.isRepeatWhile
+        kstatement.labelContinuesThroughSwitchLoops()
         return kstatement
     }
 
@@ -974,7 +1045,9 @@ final class KotlinWhileLoop: KotlinStatement {
     override func append(to output: OutputGenerator, indentation: Indentation) {
         let bodyIndentation = indentation.inc()
         if isDoWhile {
-            output.append(indentation).append("do {\n")
+            output.append(indentation)
+            appendJumpLabel(to: output)
+            output.append("do {\n")
             output.append(body, indentation: bodyIndentation)
             if let guardStatement {
                 output.append(guardStatement, indentation: bodyIndentation)
@@ -987,7 +1060,9 @@ final class KotlinWhileLoop: KotlinStatement {
             }
             output.append(")\n")
         } else {
-            output.append(indentation).append("while (")
+            output.append(indentation)
+            appendJumpLabel(to: output)
+            output.append("while (")
             if guardStatement != nil {
                 output.append("true")
             } else {

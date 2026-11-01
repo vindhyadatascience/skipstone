@@ -85,6 +85,159 @@ final class SwitchTests: XCTestCase {
         """)
     }
 
+    // A Swift continue in a case continues the enclosing loop; the one-pass loop Kotlin needs for break must not catch it
+    func testContinueInsideBreakLoop() async throws {
+        try await check(swift: """
+        for i in 0..<4 {
+            switch i {
+            case 0:
+                break
+            case 1:
+                continue
+            default:
+                if i == 3 {
+                    continue
+                }
+            }
+            print(i)
+        }
+        """, kotlin: """
+        skipcontinue@ for (i in 0..<4) {
+            for (unusedi in 0..0) {
+                when (i) {
+                    0 -> break
+                    1 -> {
+                        continue@skipcontinue
+                    }
+                    else -> {
+                        if (i == 3) {
+                            continue@skipcontinue
+                        }
+                    }
+                }
+            }
+            print(i)
+        }
+        """)
+    }
+
+    func testContinueInsideBreakLoopUsesSwiftLabel() async throws {
+        try await check(swift: """
+        var i = 0
+        outer: while i < 4 {
+            i += 1
+            switch i {
+            case 1:
+                break
+            default:
+                continue
+            }
+            print(i)
+        }
+        """, kotlin: """
+        internal var i = 0
+        outer@
+        while (i < 4) {
+            i += 1
+            for (unusedi in 0..0) {
+                when (i) {
+                    1 -> break
+                    else -> {
+                        continue@outer
+                    }
+                }
+            }
+            print(i)
+        }
+        """)
+    }
+
+    func testContinueInsideBreakLoopRepeatWhile() async throws {
+        try await check(swift: """
+        var i = 0
+        repeat {
+            i += 1
+            switch i {
+            case 1:
+                break
+            default:
+                continue
+            }
+            print(i)
+        } while i < 4
+        """, kotlin: """
+        internal var i = 0
+        skipcontinue@ do {
+            i += 1
+            for (unusedi in 0..0) {
+                when (i) {
+                    1 -> break
+                    else -> {
+                        continue@skipcontinue
+                    }
+                }
+            }
+            print(i)
+        } while (i < 4)
+        """)
+    }
+
+    func testContinueInsideBreakLoopNestedLoopUnlabeled() async throws {
+        try await check(swift: """
+        for i in 0..<4 {
+            switch i {
+            case 0:
+                break
+            default:
+                for j in 0..<i {
+                    if j == 1 {
+                        continue
+                    }
+                    print(j)
+                }
+            }
+        }
+        """, kotlin: """
+        for (i in 0..<4) {
+            for (unusedi in 0..0) {
+                when (i) {
+                    0 -> break
+                    else -> {
+                        for (j in 0..<i) {
+                            if (j == 1) {
+                                continue
+                            }
+                            print(j)
+                        }
+                    }
+                }
+            }
+        }
+        """)
+    }
+
+    func testContinueWithoutBreakLoopUnlabeled() async throws {
+        try await check(swift: """
+        for i in 0..<4 {
+            switch i {
+            case 0:
+                continue
+            default:
+                print(i)
+            }
+        }
+        """, kotlin: """
+        for (i in 0..<4) {
+            when (i) {
+                0 -> {
+                    continue
+                }
+                else -> print(i)
+            }
+        }
+        """)
+    }
+
     func testEnum() async throws {
         try await check(supportingSwift: """
         enum E {
